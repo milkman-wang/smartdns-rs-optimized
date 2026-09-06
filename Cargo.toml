@@ -286,8 +286,7 @@ indoc = "2"
 
 
 [profile.release]
-# see: https://github.com/johnthagen/min-sized-rust
 strip = true    # Automatically strip symbols from the binary.
-opt-level = "z" # Optimize for size.
+opt-level = 3   # Optimize DNS throughput; size optimization slows the cache hot path.
 lto = true
 codegen-units = 1

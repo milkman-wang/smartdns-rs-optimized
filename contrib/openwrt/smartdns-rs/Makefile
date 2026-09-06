@@ -35,6 +35,9 @@ ifeq ($(RUSTC_TARGET_ARCH),i586-unknown-linux-musl)
 endif
 
 CARGO_PKG_VARS+=SMARTDNS_OPENWRT=1
+# rust-values.mk overrides Cargo.toml with opt-level=z. Put this assignment
+# after the SDK variables so release packages retain the measured speed gain.
+CARGO_PKG_VARS+=CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 CARGO_PKG_ARGS+=--no-default-features
 
 define Package/smartdns-rs

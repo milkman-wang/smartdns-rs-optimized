@@ -148,26 +148,7 @@ impl DnsCacheMiddleware {
                         expired
                     };
 
-                    if !expired.is_empty() {
-                        for (query, group) in expired {
-                            let opts = ServerOpts {
-                                is_background: true,
-                                rule_group: group,
-                                ..Default::default()
-                            };
-                            let client = client.with_new_opt(opts);
-                            tokio::spawn(async move {
-                                let now = Instant::now();
-                                client.send(query.clone()).await;
-                                debug!(
-                                    "Prefetch domain {} {}, elapsed {:?}",
-                                    query.name(),
-                                    query.query_type(),
-                                    now.elapsed()
-                                );
-                            });
-                        }
-                    }
+                    prefetch_domains(&client, expired).await;
                 } else {
                     most_recent = Duration::ZERO;
                 }
@@ -211,17 +192,6 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 Some((res, status)) if res.name_server_group() == Some(ctx.server_group_name()) => {
                     match status {
                         CacheStatus::Valid => {
-                            // start backgroud query ?
-                            {
-                                let mut opts = ctx.server_opts.clone();
-                                opts.is_background = true;
-                                let client = self.client.with_new_opt(opts);
-                                let query = query.clone();
-                                tokio::spawn(async move {
-                                    client.send(query).await;
-                                });
-                            }
-
                             debug!(
                                 "name: {} {} using caching",
                                 query.name(),
@@ -314,6 +284,43 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 Err(err)
             }
         }
+    }
+}
+
+// A persisted cache can expire thousands of entries together. Limit both
+// concurrency and admission rate so fast refreshes cannot starve live queries
+// or fill the router's connection tracking table by cycling UDP source ports.
+const MAX_PREFETCH_CONCURRENCY: usize = 16;
+
+async fn prefetch_domains(client: &DnsHandle, domains: Vec<(Query, Option<String>)>) {
+    use futures_util::{StreamExt, stream};
+
+    let mut batches = stream::iter(domains).chunks(MAX_PREFETCH_CONCURRENCY);
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    while let Some(batch) = batches.next().await {
+        interval.tick().await;
+        stream::iter(batch)
+            .for_each_concurrent(MAX_PREFETCH_CONCURRENCY, |(query, group)| {
+                let opts = ServerOpts {
+                    is_background: true,
+                    rule_group: group,
+                    ..Default::default()
+                };
+                let client = client.with_new_opt(opts);
+                async move {
+                    let now = Instant::now();
+                    client.send(query.clone()).await;
+                    debug!(
+                        "Prefetch domain {} {}, elapsed {:?}",
+                        query.name(),
+                        query.query_type(),
+                        now.elapsed()
+                    );
+                }
+            })
+            .await;
     }
 }
 
@@ -445,19 +452,15 @@ impl DnsCache {
             .with_name_server_group(name_server_group.to_string());
 
         {
-            let cache = self.cache.clone();
-            let lookup = lookup.clone();
-            tokio::spawn(async move {
-                let mut cache = cache.lock().await;
-
-                if let Some(entry) = cache.get_mut(&query) {
-                    entry.data = lookup;
-                    entry.valid_until = valid_until;
-                    entry.stats.hit();
-                } else {
-                    cache.put(query, DnsCacheEntry::new(lookup, valid_until));
-                }
-            });
+            // Publish the entry before returning, so the next query can use it.
+            let mut cache = self.cache.lock().await;
+            if let Some(entry) = cache.get_mut(&query) {
+                entry.set_data(lookup.clone());
+                entry.set_valid_until(valid_until);
+                entry.stats.hit();
+            } else {
+                cache.put(query, DnsCacheEntry::new(lookup.clone(), valid_until));
+            }
         }
 
         lookup
@@ -899,8 +902,33 @@ impl PersistCache for LruCache<Query, DnsCacheEntry> {
 mod tests {
 
     use rr::rdata::{A, CNAME};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    struct CountingUpstream {
+        queries: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for CountingUpstream {
+        async fn handle(
+            &self,
+            _ctx: &mut DnsContext,
+            req: &DnsRequest,
+            _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+        ) -> Result<DnsResponse, DnsError> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+
+            let query = req.query().original().clone();
+            let record = Record::from_rdata(
+                query.name().clone(),
+                600,
+                RData::A("192.0.2.1".parse().unwrap()),
+            );
+            Ok(DnsResponse::new_with_max_ttl(query, vec![record]))
+        }
+    }
 
     fn create_lookup(name: &str, data: RData, ttl: u64) -> DnsCacheEntry {
         let name: Name = name.parse().unwrap();
@@ -969,8 +997,6 @@ mod tests {
                 "default",
             )
             .await;
-
-        sleep(Duration::from_millis(500)).await;
 
         assert!(cache.get(lookup1.data.query(), now).await.is_some());
 
@@ -1071,8 +1097,210 @@ mod tests {
             .insert_records(query.clone(), records.iter().cloned(), now, "default")
             .await;
 
-        tokio::task::yield_now().await;
-
         assert!(cache.get(&query, now).await.unwrap().0.records() == records);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_valid_cache_hits_do_not_start_background_queries() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+        use futures_util::future::join_all;
+        use std::sync::Arc;
+
+        let cfg = Arc::new(RuntimeConfig::default());
+        assert!(!cfg.prefetch_domain());
+
+        let (background_rx, background_handle) = DnsHandle::new();
+        let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
+        let cache = cache_middleware.cache().clone();
+        let upstream_queries = Arc::new(AtomicUsize::new(0));
+        let handler = DnsMiddlewareBuilder::new()
+            .with(cache_middleware)
+            .with(CountingUpstream {
+                queries: upstream_queries.clone(),
+            })
+            .build(cfg);
+
+        let name: Name = "cache-hit.example.".parse().unwrap();
+        let query = Query::query(name.clone(), RecordType::A);
+
+        handler.lookup(name.clone(), RecordType::A).await.unwrap();
+        assert_eq!(upstream_queries.load(Ordering::SeqCst), 1);
+
+        assert!(cache.get(&query, Instant::now()).await.is_some());
+
+        let receiver = tokio::spawn(count_background_queries(background_rx));
+        let requests = (0..128).map(|_| handler.lookup(name.clone(), RecordType::A));
+        let responses = join_all(requests).await;
+
+        for response in responses {
+            let response = response.unwrap();
+            assert_eq!(response.query(), &query);
+            assert_eq!(response.records().len(), 1);
+            assert_eq!(
+                response.records()[0].data(),
+                &RData::A("192.0.2.1".parse().unwrap())
+            );
+        }
+        assert_eq!(upstream_queries.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_expired_cache_hit_still_starts_background_refresh() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+
+        let cfg = Arc::new(RuntimeConfig::default());
+        let (mut background_rx, background_handle) = DnsHandle::new();
+        let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
+        let query = Query::query("expired.example.".parse().unwrap(), RecordType::A);
+        let record = Record::from_rdata(
+            query.name().clone(),
+            30,
+            RData::A("192.0.2.1".parse().unwrap()),
+        );
+        cache_middleware
+            .cache()
+            .insert(
+                query.clone(),
+                vec![(record, 30)],
+                Instant::now() - Duration::from_secs(31),
+                "default",
+            )
+            .await;
+        let upstream_queries = Arc::new(AtomicUsize::new(0));
+        let handler = DnsMiddlewareBuilder::new()
+            .with(cache_middleware)
+            .with(CountingUpstream {
+                queries: upstream_queries.clone(),
+            })
+            .build(cfg);
+
+        let response = handler
+            .lookup(query.name().clone(), RecordType::A)
+            .await
+            .unwrap();
+        assert_eq!(response.records().len(), 1);
+        assert_eq!(response.records()[0].ttl(), 5);
+        assert_eq!(
+            response.records()[0].data(),
+            &RData::A("192.0.2.1".parse().unwrap())
+        );
+        assert_eq!(upstream_queries.load(Ordering::SeqCst), 0);
+        let (message, opts, _) = tokio::time::timeout(Duration::from_secs(1), background_rx.recv())
+            .await
+            .expect("an expired answer must schedule a refresh")
+            .unwrap();
+        assert!(opts.is_background);
+        assert_eq!(
+            DnsRequest::try_from(message).unwrap().query().original(),
+            &query
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refreshed_entry_can_be_prefetched_again() {
+        let cache = DnsCache::new(10, true, 0, 5);
+        let query = Query::query("prefetch.example.".parse().unwrap(), RecordType::A);
+        let record = Record::from_rdata(
+            query.name().clone(),
+            30,
+            RData::A("192.0.2.1".parse().unwrap()),
+        );
+        let now = Instant::now();
+        cache
+            .insert(query.clone(), vec![(record.clone(), 30)], now, "default")
+            .await;
+
+        let first_refresh = now + Duration::from_secs(31);
+        let (expired, _) = cache.get_expired(first_refresh, Some(0)).await;
+        assert_eq!(expired, vec![(query.clone(), Some("default".into()))]);
+        assert!(cache.get_expired(first_refresh, Some(0)).await.0.is_empty());
+
+        cache
+            .insert(query.clone(), vec![(record, 30)], first_refresh, "default")
+            .await;
+        let (response, status) = cache.get(&query, first_refresh).await.unwrap();
+        assert!(matches!(status, CacheStatus::Valid));
+        assert_eq!(response.records()[0].ttl(), 30);
+        assert_eq!(
+            response.records()[0].data(),
+            &RData::A("192.0.2.1".parse().unwrap())
+        );
+        let (expired, _) = cache
+            .get_expired(first_refresh + Duration::from_secs(31), Some(0))
+            .await;
+        assert_eq!(expired, vec![(query, Some("default".into()))]);
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_limits_in_flight_queries_and_drains_the_queue() {
+        let (mut receiver, client) = DnsHandle::new();
+        let domains = (0..40)
+            .map(|i| {
+                (
+                    Query::query(
+                        format!("prefetch{i}.example.").parse().unwrap(),
+                        RecordType::A,
+                    ),
+                    Some("prefetch-group".to_owned()),
+                )
+            })
+            .collect();
+        let started = Instant::now();
+        let worker = tokio::spawn(async move { prefetch_domains(&client, domains).await });
+
+        let mut pending = Vec::new();
+        for _ in 0..16 {
+            let request = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(request.1.is_background);
+            assert_eq!(request.1.rule_group.as_deref(), Some("prefetch-group"));
+            pending.push(request);
+        }
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        for (message, _, sender) in pending {
+            let request = DnsRequest::try_from(message).unwrap();
+            assert!(sender.send(request.to_response().into()).is_ok());
+        }
+        for _ in 16..40 {
+            let (message, _, sender) =
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let request = DnsRequest::try_from(message).unwrap();
+            assert!(sender.send(request.to_response().into()).is_ok());
+        }
+        assert!(started.elapsed() >= Duration::from_millis(1900));
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("all queued domains should finish without another incoming query")
+            .unwrap();
+    }
+
+    async fn count_background_queries(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::server::IncomingDnsMessage>,
+    ) -> usize {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut count = 0;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return count;
+            }
+
+            match tokio::time::timeout(remaining, receiver.recv()).await {
+                Ok(Some(_)) => count += 1,
+                Ok(None) | Err(_) => return count,
+            }
+        }
     }
 }
