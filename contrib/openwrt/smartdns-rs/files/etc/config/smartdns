@@ -5,6 +5,8 @@ config smartdns
 	option tcp_server '1'
 	option ipv6_server '1'
 	option bind_device '0'
+	option speed_check_mode 'ping,tcp:80,tcp:443'
+	option response_mode 'first-ping'
 	option dualstack_ip_selection '1'
 	option serve_expired '1'
 	option cache_size '4096'

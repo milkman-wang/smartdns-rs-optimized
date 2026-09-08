@@ -560,7 +560,11 @@ load_global()
 
 	config_get value "$section" server_name
 	[ -n "$value" ] && conf_append server-name "$value"
-	for option in speed_check_mode response_mode cache_size rr_ttl rr_ttl_min rr_ttl_max rr_ttl_reply_max; do
+	config_get value "$section" speed_check_mode
+	conf_append speed-check-mode "${value:-ping,tcp:80,tcp:443}"
+	config_get value "$section" response_mode
+	conf_append response-mode "${value:-first-ping}"
+	for option in cache_size rr_ttl rr_ttl_min rr_ttl_max rr_ttl_reply_max; do
 		config_get value "$section" "$option"
 		[ -n "$value" ] && conf_append "$(printf '%s' "$option" | tr '_' '-')" "$value"
 	done

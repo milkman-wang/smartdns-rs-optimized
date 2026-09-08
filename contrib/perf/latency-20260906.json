@@ -1,0 +1,800 @@
+{
+  "date": "2026-09-06",
+  "hardware": "Xiaomi BE10000 / QWRT 25.12.2",
+  "workload": {
+    "offered_qps": 100,
+    "seconds": 10,
+    "max_outstanding": 4,
+    "domains": 256,
+    "cache_size": 4096,
+    "server_cpu_mask": "f",
+    "client_cpu_mask": "1",
+    "upstream": "SIGSTOP during timed interval",
+    "network": "isolated network namespace",
+    "governor": "ondemand unchanged"
+  },
+  "runs": [
+    {
+      "label": "lowload-w1-1",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 214,
+      "p95_us": 287,
+      "p99_us": 1738,
+      "avg_us": 282.3,
+      "server_cpu_pct": 1.4,
+      "server_rss_kb": 6924
+    },
+    {
+      "label": "lowload-w2-1",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 223,
+      "p95_us": 279,
+      "p99_us": 362,
+      "avg_us": 204,
+      "server_cpu_pct": 1.7,
+      "server_rss_kb": 6976
+    },
+    {
+      "label": "lowload-w4-1",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10,
+      "p50_us": 231,
+      "p95_us": 313,
+      "p99_us": 418,
+      "avg_us": 212.5,
+      "server_cpu_pct": 1.5,
+      "server_rss_kb": 6976
+    },
+    {
+      "label": "lowload-w2-2",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 221,
+      "p95_us": 269,
+      "p99_us": 326,
+      "avg_us": 242,
+      "server_cpu_pct": 1.5,
+      "server_rss_kb": 6976
+    },
+    {
+      "label": "lowload-w4-2",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 231,
+      "p95_us": 309,
+      "p99_us": 1297,
+      "avg_us": 275,
+      "server_cpu_pct": 1.6,
+      "server_rss_kb": 7060
+    },
+    {
+      "label": "lowload-w1-2",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10,
+      "p50_us": 210,
+      "p95_us": 279,
+      "p99_us": 357,
+      "avg_us": 210.8,
+      "server_cpu_pct": 1.3,
+      "server_rss_kb": 6924
+    },
+    {
+      "label": "lowload-w4-3",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 213,
+      "p95_us": 288,
+      "p99_us": 326,
+      "avg_us": 191.4,
+      "server_cpu_pct": 1.5,
+      "server_rss_kb": 6980
+    },
+    {
+      "label": "lowload-w1-3",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 203,
+      "p95_us": 281,
+      "p99_us": 344,
+      "avg_us": 184.9,
+      "server_cpu_pct": 1.5,
+      "server_rss_kb": 6924
+    },
+    {
+      "label": "lowload-w2-3",
+      "qps": 100,
+      "success": 1000,
+      "errors": 0,
+      "timeouts": 0,
+      "seconds": 10.001,
+      "p50_us": 241,
+      "p95_us": 313,
+      "p99_us": 396,
+      "avg_us": 214.9,
+      "server_cpu_pct": 1.5,
+      "server_rss_kb": 6972
+    }
+  ],
+  "dualstack_comparison": {
+    "cache_size": 0,
+    "workers": 2,
+    "nameserver_settings": "Production upstreams and rules retained; only test cache and dualstack setting changed",
+    "transport": "UDP from Windows LAN client",
+    "runs": [
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 39.81
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 31.79
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.19
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 31.5
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 29.69
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.27
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 31.14
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 33.69
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 37.63
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 52.86
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 91.72
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 5,
+        "ms": 36.33
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 46.06
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 38.75
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 80.95
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 40.74
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 38.57
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 38.71
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 82.71
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 38.38
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 41.77
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 32.09
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 1,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 31.55
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 1,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 34.23
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 34.75
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 30.05
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 32.87
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.85
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 33.48
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.38
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.61
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 46.43
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 41.45
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 40.16
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 40.0
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 45.58
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 41.48
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 40.51
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 47.89
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 43.44
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 41.64
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 40.71
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 37.11
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 48.08
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 41.87
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 45.76
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 2,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 31.33
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 2,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 38.85
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 30.7
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.baidu.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 31.68
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 31.36
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.baidu.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 31.41
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 30.78
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.qq.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 32.24
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 36.67
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.qq.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 31.43
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 31.87
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.apple.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 4,
+        "ms": 34.57
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 45.94
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.apple.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 5,
+        "ms": 41.85
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 40.29
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "cloudflare.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 40.18
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 47.24
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "cloudflare.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 2,
+        "ms": 38.25
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 43.96
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.microsoft.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 3,
+        "ms": 39.18
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 48.32
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "www.microsoft.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 7,
+        "ms": 28.22
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 43.48
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "github.com",
+        "type": 1,
+        "rcode": 0,
+        "answers": 1,
+        "ms": 40.35
+      },
+      {
+        "mode": "selection_on",
+        "repeat": 3,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 48.68
+      },
+      {
+        "mode": "selection_off",
+        "repeat": 3,
+        "name": "github.com",
+        "type": 28,
+        "rcode": 0,
+        "answers": 0,
+        "ms": 43.14
+      }
+    ]
+  }
+}

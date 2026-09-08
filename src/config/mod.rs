@@ -74,7 +74,8 @@ pub struct Config {
     /// ```
     pub server_name: Option<Name>,
 
-    /// The number of worker threads
+    /// The number of worker threads. When omitted, use the available CPU
+    /// parallelism. An explicit count is a per-device tuning override.
     pub num_workers: Option<usize>,
 
     pub mdns_lookup: Option<bool>,

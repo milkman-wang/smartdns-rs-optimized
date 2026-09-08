@@ -1,0 +1,194 @@
+[
+  {
+    "mode": "before",
+    "name": "www.bilibili.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 2,
+    "ms": 626.12
+  },
+  {
+    "mode": "before",
+    "name": "www.bilibili.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 0,
+    "ms": 5006.22
+  },
+  {
+    "mode": "before",
+    "name": "www.baidu.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 282.34
+  },
+  {
+    "mode": "before",
+    "name": "www.baidu.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 2,
+    "ms": 5006.05
+  },
+  {
+    "mode": "before",
+    "name": "www.qq.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 5003.75
+  },
+  {
+    "mode": "before",
+    "name": "www.qq.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 219.27
+  },
+  {
+    "mode": "before",
+    "name": "www.mozilla.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 217.57
+  },
+  {
+    "mode": "before",
+    "name": "www.mozilla.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 219.32
+  },
+  {
+    "mode": "before",
+    "name": "www.rust-lang.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 221.38
+  },
+  {
+    "mode": "before",
+    "name": "www.rust-lang.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 226.93
+  },
+  {
+    "mode": "before",
+    "name": "www.wikipedia.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 304.42
+  },
+  {
+    "mode": "before",
+    "name": "www.wikipedia.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 300.39
+  },
+  {
+    "mode": "fixed",
+    "name": "www.bilibili.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 2,
+    "ms": 625.99
+  },
+  {
+    "mode": "fixed",
+    "name": "www.bilibili.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 0,
+    "ms": 223.19
+  },
+  {
+    "mode": "fixed",
+    "name": "www.baidu.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 214.14
+  },
+  {
+    "mode": "fixed",
+    "name": "www.baidu.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 2,
+    "ms": 222.84
+  },
+  {
+    "mode": "fixed",
+    "name": "www.qq.com",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 613.06
+  },
+  {
+    "mode": "fixed",
+    "name": "www.qq.com",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 223.47
+  },
+  {
+    "mode": "fixed",
+    "name": "www.mozilla.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 223.35
+  },
+  {
+    "mode": "fixed",
+    "name": "www.mozilla.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 212.73
+  },
+  {
+    "mode": "fixed",
+    "name": "www.rust-lang.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 218.6
+  },
+  {
+    "mode": "fixed",
+    "name": "www.rust-lang.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 211.06
+  },
+  {
+    "mode": "fixed",
+    "name": "www.wikipedia.org",
+    "type": 1,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 210.29
+  },
+  {
+    "mode": "fixed",
+    "name": "www.wikipedia.org",
+    "type": 28,
+    "rcode": 0,
+    "answers": 1,
+    "ms": 211.89
+  }
+]

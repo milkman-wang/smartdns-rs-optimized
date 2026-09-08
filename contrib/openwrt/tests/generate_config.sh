@@ -19,6 +19,8 @@ mock_value()
 		global.ipv6_server) echo 1 ;;
 		global.bind_device) echo 1 ;;
 		global.bind_device_name) echo br-lan ;;
+		global.speed_check_mode) [ "${TEST_SPEED_MODE+x}" = x ] && printf '%s' "$TEST_SPEED_MODE" ;;
+		global.response_mode) [ "${TEST_RESPONSE_MODE+x}" = x ] && printf '%s' "$TEST_RESPONSE_MODE" ;;
 		global.dualstack_ip_selection) echo 1 ;;
 		global.serve_expired) echo 1 ;;
 		global.cache_persist) echo 1 ;;
@@ -161,6 +163,8 @@ assert_line()
 }
 
 assert_line 'user nobody'
+assert_line 'speed-check-mode ping,tcp:80,tcp:443'
+assert_line 'response-mode first-ping'
 assert_line 'bind 0.0.0.0:6053@br-lan '
 assert_line 'bind [::]:6053@br-lan '
 assert_line 'bind 127.0.0.1:6053 '
@@ -179,5 +183,17 @@ assert_line 'bogus-nxdomain 203.0.113.0/24'
 assert_line 'ip-alias 203.0.113.0/24 192.0.2.1,192.0.2.2'
 assert_line "conf-file $TEST_ROOT/included.conf"
 assert_line "hosts-file $TEST_ROOT/hosts"
+
+TEST_SPEED_MODE=none
+TEST_RESPONSE_MODE=fastest-response
+generate_config
+assert_line 'speed-check-mode none'
+assert_line 'response-mode fastest-response'
+
+TEST_SPEED_MODE=''
+TEST_RESPONSE_MODE=''
+generate_config
+assert_line 'speed-check-mode ping,tcp:80,tcp:443'
+assert_line 'response-mode first-ping'
 
 echo "OpenWrt generated configuration smoke test: OK"

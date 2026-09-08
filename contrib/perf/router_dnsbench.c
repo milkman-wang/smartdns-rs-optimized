@@ -112,7 +112,7 @@ static void serve(int fd)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s server PORT | client PORT SECONDS WINDOW PID [DOMAINS]\n", argv[0]);
+        fprintf(stderr, "Usage: %s server PORT | client PORT SECONDS WINDOW PID [DOMAINS] [QPS]\n", argv[0]);
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -135,7 +135,8 @@ int main(int argc, char **argv)
     int pid = atoi(argv[5]);
     if (argc > 6)
         domains = atoi(argv[6]);
-    if (window < 1 || window > 1024 || domains == 0 || duration <= 0)
+    double rate = argc > 7 ? atof(argv[7]) : 0;
+    if (window < 1 || window > 1024 || domains == 0 || duration <= 0 || rate < 0)
         return 2;
     if (connect(fd, (void *)&address, sizeof(address)))
         return 3;
@@ -145,10 +146,11 @@ int main(int argc, char **argv)
     int active = 0;
     long start_ticks = cpu_ticks(pid);
     double start = now(), deadline = start + duration, total_latency = 0;
+    double next_send = start;
     unsigned char buffer[4096];
     while (now() < deadline || active) {
         double time = now();
-        while (time < deadline && active < window) {
+        while (time < deadline && active < window && (!rate || time >= next_send)) {
             unsigned id = sequence++ & 65535;
             int length = question(buffer, id, sequence);
             names[id] = sequence;
@@ -158,9 +160,18 @@ int main(int argc, char **argv)
                 return 4;
             }
             active++;
+            if (rate)
+                next_send += 1.0 / rate;
         }
         struct pollfd event = {.fd = fd, .events = POLLIN};
-        int ready = poll(&event, 1, 10);
+        int wait_ms = 10;
+        if (rate && active < window && time < deadline) {
+            double wait_seconds = next_send - now();
+            int until_send_ms = wait_seconds > 0 ? (int)(wait_seconds * 1000 + 0.999) : 0;
+            if (until_send_ms < wait_ms)
+                wait_ms = until_send_ms;
+        }
+        int ready = poll(&event, 1, wait_ms);
         if (ready > 0) {
             int length = recv(fd, buffer, sizeof(buffer), 0);
             if (length >= 12) {
@@ -189,7 +200,7 @@ int main(int argc, char **argv)
                 errors++;
             }
         }
-        if (ready == 0) {
+        if (ready == 0 && active) {
             time = now();
             for (unsigned i = 0; i < 65536; i++) {
                 if (sent[i] && time - sent[i] > 0.5) {

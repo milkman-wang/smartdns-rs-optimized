@@ -7,7 +7,6 @@ use crate::dns_client::{LookupOptions, NameServer};
 
 use crate::infra::ipset::{IpMap, IpSet};
 use crate::infra::ping::{PingError, PingOutput};
-use crate::third_ext::FutureTimeoutExt;
 use crate::{
     config::{ResponseMode, SpeedCheckMode, SpeedCheckModeList},
     dns::*,
@@ -19,7 +18,7 @@ use crate::{
 
 use crate::libdns::proto::rr::domain::usage::LOCAL;
 use crate::libdns::proto::{AuthorityData, op::ResponseCode, rr::rdata::opt::EdnsCode};
-use futures::FutureExt;
+use futures::{FutureExt, future::BoxFuture};
 use rr::rdata::opt::EdnsOption;
 use tokio::time::sleep;
 
@@ -200,11 +199,10 @@ async fn lookup_ip(
     options: &LookupIpOptions,
 ) -> Result<DnsResponse, LookupError> {
     use ResponseMode::*;
-    use futures_util::future::{Either, select, select_all};
 
     assert!(options.record_type.is_ip_addr());
 
-    let mut query_tasks = server
+    let query_tasks = server
         .iter()
         .map(|ns| per_nameserver_lookup_ip(ns, name.clone(), options).boxed())
         .collect::<Vec<_>>();
@@ -231,6 +229,52 @@ async fn lookup_ip(
         speed_check_mode = &[];
     }
 
+    select_ip_response(name, response_strategy, speed_check_mode, query_tasks).await
+}
+
+// Once an upstream has answered, a slow peer must not hold the response until its
+// full network timeout. Keep a short window for competing answers, including a
+// positive answer following NODATA. Probe timeouts remain independent.
+fn limit_remaining_queries<'a>(
+    tasks: &mut Vec<BoxFuture<'a, Result<DnsResponse, LookupError>>>,
+    received_response: &mut bool,
+    response: &Result<DnsResponse, LookupError>,
+) {
+    let valid_response = match response {
+        Ok(response) => matches!(
+            response.response_code(),
+            ResponseCode::NoError | ResponseCode::NXDomain
+        ),
+        Err(error) => error.is_no_records_found() || error.is_nx_domain(),
+    };
+    if *received_response || !valid_response {
+        return;
+    }
+    *received_response = true;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    *tasks = std::mem::take(tasks)
+        .into_iter()
+        .map(|task| {
+            async move {
+                tokio::time::timeout_at(deadline, task)
+                    .await
+                    .unwrap_or_else(|_| Err(ProtoErrorKind::Timeout.into()))
+            }
+            .boxed()
+        })
+        .collect();
+}
+
+async fn select_ip_response(
+    name: Name,
+    response_strategy: ResponseMode,
+    speed_check_mode: &[SpeedCheckMode],
+    mut query_tasks: Vec<BoxFuture<'_, Result<DnsResponse, LookupError>>>,
+) -> Result<DnsResponse, LookupError> {
+    use ResponseMode::*;
+    use futures_util::future::{Either, select, select_all};
+
+    let mut received_response = false;
     let mut ok_tasks = vec![];
     let mut err_tasks = vec![];
 
@@ -275,6 +319,9 @@ async fn lookup_ip(
                     break;
                 }
 
+                if let Some(res) = &query_res {
+                    limit_remaining_queries(&mut query_tasks, &mut received_response, res);
+                }
                 match query_res {
                     Some(v) => match v {
                         Ok(lookup) => {
@@ -283,20 +330,22 @@ async fn lookup_ip(
                                 return Ok(lookup);
                             }
                             ok_tasks.push(lookup);
-                            ping_tasks.push(
-                                multi_mode_ping_fastest(
-                                    name.clone(),
-                                    ip_addrs,
-                                    speed_check_mode.to_vec(),
-                                )
-                                .boxed(),
-                            );
+                            if !ip_addrs.is_empty() {
+                                ping_tasks.push(
+                                    multi_mode_ping_fastest(
+                                        name.clone(),
+                                        ip_addrs,
+                                        speed_check_mode.to_vec(),
+                                    )
+                                    .boxed(),
+                                );
+                            }
                         }
                         Err(err) => {
                             err_tasks.push(err);
                         }
                     },
-                    None => break,
+                    None => continue,
                 }
             }
 
@@ -363,29 +412,14 @@ async fn lookup_ip(
                 if let Some(Ok(out)) = ping_res
                     && match fastest_ip.as_ref() {
                         Some(t) => out.elapsed() < t.elapsed(),
-                        None => {
-                            // first get speed, add timeout
-                            query_tasks = query_tasks
-                                .into_iter()
-                                .map(|q| {
-                                    async {
-                                        match q.timeout(Duration::from_millis(200)).await {
-                                            Ok(t) => t,
-                                            Err(_) => Err(ProtoErrorKind::Timeout.into()),
-                                        }
-                                    }
-                                    .boxed()
-                                })
-                                .collect();
-
-                            true
-                        }
+                        None => true,
                     }
                 {
                     fastest_ip = Some(out);
                 }
 
                 if let Some(res) = query_res {
+                    limit_remaining_queries(&mut query_tasks, &mut received_response, &res);
                     match res {
                         Ok(lookup) => {
                             let ip_addrs = lookup.ip_addrs();
@@ -646,10 +680,148 @@ async fn per_nameserver_lookup_ip(
 mod tests {
     use std::str::FromStr;
 
+    use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::rdata::opt::ClientSubnet;
 
     use super::*;
     use crate::{dns_conf::RuntimeConfig, third_ext::FutureJoinAllExt};
+
+    fn speed_test_response(ips: &[&str], record_type: RecordType) -> DnsResponse {
+        let name: Name = "speed-test.example.".parse().unwrap();
+        let records: Vec<_> = ips
+            .iter()
+            .map(|ip| {
+                Record::from_rdata(name.clone(), 60, RData::from(ip.parse::<IpAddr>().unwrap()))
+            })
+            .collect();
+        DnsResponse::new_with_max_ttl(Query::query(name, record_type), records)
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_nodata_does_not_wait_for_silent_upstream() {
+        for mode in [ResponseMode::FirstPing, ResponseMode::FastestIp] {
+            let response = speed_test_response(&[], RecordType::AAAA);
+            let name = response.query().name().clone();
+            let tasks = vec![
+                async { Ok(response) }.boxed(),
+                futures::future::pending().boxed(),
+            ];
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                select_ip_response(name, mode, &[SpeedCheckMode::Ping], tasks),
+            )
+            .await
+            .expect("NODATA must not wait for a silent upstream")
+            .unwrap();
+            assert_eq!(response.response_code(), ResponseCode::NoError);
+            assert!(response.records().is_empty());
+            assert_eq!(response.query().query_type(), RecordType::AAAA);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_negative_error_is_preserved() {
+        for mode in [ResponseMode::FirstPing, ResponseMode::FastestIp] {
+            let query = Query::query("missing.example.".parse().unwrap(), RecordType::AAAA);
+            let name = query.name().clone();
+            let authority = AuthorityData::new(Box::new(query), None, true, true, None);
+            let tasks = vec![
+                async { Err(ProtoErrorKind::NoRecordsFound(authority.into()).into()) }.boxed(),
+                futures::future::pending().boxed(),
+            ];
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                select_ip_response(name, mode, &[SpeedCheckMode::Ping], tasks),
+            )
+            .await
+            .expect("a negative DNS answer must bound the remaining wait")
+            .unwrap_err();
+            assert!(error.is_nx_domain());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_accepts_positive_after_nodata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let modes = [SpeedCheckMode::Tcp(listener.local_addr().unwrap().port())];
+        for mode in [ResponseMode::FirstPing, ResponseMode::FastestIp] {
+            let empty = speed_test_response(&[], RecordType::A);
+            let name = empty.query().name().clone();
+            let tasks = vec![
+                async { Ok(empty) }.boxed(),
+                async {
+                    sleep(Duration::from_millis(30)).await;
+                    Ok(speed_test_response(&["127.0.0.1"], RecordType::A))
+                }
+                .boxed(),
+                futures::future::pending().boxed(),
+            ];
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                select_ip_response(name, mode, &modes, tasks),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                response.ip_addrs(),
+                vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_failed_probes_keep_answer_without_waiting_for_upstream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let modes = [SpeedCheckMode::Tcp(listener.local_addr().unwrap().port())];
+        for mode in [ResponseMode::FirstPing, ResponseMode::FastestIp] {
+            let answer = speed_test_response(&["127.0.0.2", "127.0.0.3"], RecordType::A);
+            let name = answer.query().name().clone();
+            let tasks = vec![
+                async { Ok(answer) }.boxed(),
+                futures::future::pending().boxed(),
+            ];
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                select_ip_response(name, mode, &modes, tasks),
+            )
+            .await
+            .expect("failed probes must not expose the full upstream timeout")
+            .unwrap();
+            let ips = response.ip_addrs();
+            assert_eq!(ips.len(), 1);
+            assert!(
+                [
+                    "127.0.0.2".parse::<IpAddr>().unwrap(),
+                    "127.0.0.3".parse().unwrap()
+                ]
+                .contains(&ips[0])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_first_ping_continues_after_failed_probe_group() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let modes = [SpeedCheckMode::Tcp(listener.local_addr().unwrap().port())];
+        let answer = speed_test_response(&["127.0.0.2", "127.0.0.3"], RecordType::A);
+        let name = answer.query().name().clone();
+        let tasks = vec![
+            async { Ok(answer) }.boxed(),
+            async {
+                sleep(Duration::from_millis(30)).await;
+                Ok(speed_test_response(&["127.0.0.1"], RecordType::A))
+            }
+            .boxed(),
+        ];
+        let response = select_ip_response(name, ResponseMode::FirstPing, &modes, tasks)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.ip_addrs(),
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
 
     #[test]
     fn test_edns_client_subnet() {

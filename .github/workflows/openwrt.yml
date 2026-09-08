@@ -90,7 +90,9 @@ jobs:
           msgfmt --check --output-file=/dev/null contrib/openwrt/luci-app-smartdns-rs/po/zh_Hans/smartdns-rs.po
 
       - name: Test Rust compatibility parser
-        run: cargo test --locked --no-default-features --features openwrt config::parser::domain_rule::tests
+        run: |
+          cargo test --locked --no-default-features --features openwrt config::parser::domain_rule::tests
+          cargo test --locked --no-default-features --features openwrt test_speed_response
 
   sdk:
     name: OpenWrt SDK (${{ matrix.arch }})

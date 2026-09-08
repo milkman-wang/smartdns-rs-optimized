@@ -38,6 +38,10 @@
 
 LuCI 页面只显示 Rust 后端能解析和执行的选项，避免“页面保存成功、守护进程却忽略配置”。仍可在“自定义配置”页使用 SmartDNS-rs 自己支持的高级指令。
 
+“常规设置”集中提供测速模式、响应模式和双栈 IP 优选。OpenWrt 在 UCI 未填写或留空时生成 `speed-check-mode ping,tcp:80,tcp:443` 和 `response-mode first-ping`；明确填写的值（包括测速 `none`）会保留。域名和客户端规则中的“默认”仍表示继承。仓库示例 `smartdns.conf` 也显式启用上述配置；这些是配置文件默认值，不改变 Rust 对其他手写配置的解析行为。
+
+测速用于选择可达地址，会增加部分未缓存查询的等待时间。`first-ping` 尽快返回测速成功的地址，`fastest-ip` 等待比较，`fastest-response` 直接采用上游响应。双栈优选另行比较 IPv4/IPv6，若希望跳过这部分比较，需要单独关闭该选项。
+
 逐个 UCI 字段及替代行为见 [INTERFACE_MATRIX.md](INTERFACE_MATRIX.md)。
 
 ## 放入 OpenWrt 源码树

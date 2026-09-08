@@ -213,16 +213,22 @@ return view.extend({
 		o.placeholder = uci.get('network', 'lan', 'device') || 'br-lan';
 		o.depends('bind_device', '1');
 
-		o = s.taboption('advanced', form.Value, 'speed_check_mode', _('Speed Check Mode'));
-		addSpeedModes(o, true);
+		o = s.taboption('general', form.Value, 'speed_check_mode', _('Speed Check Mode'),
+			_('Default: ping,tcp:80,tcp:443. Tests address reachability in this order. Use none to disable response address speed checks.'));
+		addSpeedModes(o, false);
+		o.default = 'ping,tcp:80,tcp:443';
+		o.rmempty = false;
 
-		o = s.taboption('advanced', form.ListValue, 'response_mode', _('Response Mode'));
-		o.value('', _('Default'));
+		o = s.taboption('general', form.ListValue, 'response_mode', _('Response Mode'),
+			_('First Ping returns after the first successful speed check. Fastest IP waits to compare addresses. Fastest Response returns the upstream answer without response address speed checks.'));
+		o.default = 'first-ping';
+		o.rmempty = false;
 		o.value('first-ping', _('First Ping'));
 		o.value('fastest-ip', _('Fastest IP'));
 		o.value('fastest-response', _('Fastest Response'));
 
-		o = s.taboption('advanced', form.Flag, 'dualstack_ip_selection', _('Dual-stack IP Selection'));
+		o = s.taboption('general', form.Flag, 'dualstack_ip_selection', _('Dual-stack IP Selection'),
+			_('Compares IPv4 and IPv6 reachability separately and may add DNS latency. Disable to return both families without this comparison.'));
 		o.default = o.enabled;
 		o.rmempty = false;
 

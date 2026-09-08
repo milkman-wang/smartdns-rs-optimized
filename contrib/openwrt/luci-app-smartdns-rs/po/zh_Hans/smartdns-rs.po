@@ -1613,3 +1613,12 @@ msgstr "缓存文件必须使用 /etc/smartdns/名称.cache。"
 
 msgid "Log files must be directly under /var/log/smartdns/."
 msgstr "日志文件必须直接位于 /var/log/smartdns/ 目录下。"
+
+msgid "Default: ping,tcp:80,tcp:443. Tests address reachability in this order. Use none to disable response address speed checks."
+msgstr "默认：ping,tcp:80,tcp:443，依次尝试这些方式检测地址连通性。选择 none 可关闭响应地址测速。"
+
+msgid "First Ping returns after the first successful speed check. Fastest IP waits to compare addresses. Fastest Response returns the upstream answer without response address speed checks."
+msgstr "首次测速成功即返回：尽快返回可达地址；最快 IP：等待测速并比较地址；最快响应：直接返回上游应答，不进行响应地址测速。"
+
+msgid "Compares IPv4 and IPv6 reachability separately and may add DNS latency. Disable to return both families without this comparison."
+msgstr "独立比较 IPv4 与 IPv6 的连通性，可能增加 DNS 延迟。关闭后不进行此比较，分别返回两类查询的结果。"
