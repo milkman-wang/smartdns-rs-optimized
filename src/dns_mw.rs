@@ -244,6 +244,11 @@ mod tests {
             self.with_multi_records(record.name().clone(), record.record_type(), vec![record])
         }
 
+        pub fn with_result(mut self, query: Query, result: Result<DnsResponse, DnsError>) -> Self {
+            self.map.insert(query, result);
+            self
+        }
+
         pub fn with_multi_records<Name: IntoName + Debug>(
             mut self,
             name: Name,

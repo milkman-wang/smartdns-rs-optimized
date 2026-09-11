@@ -415,8 +415,13 @@ async fn process(
                                                     e,
                                                     start.elapsed()
                                                 );
-                                                response_header
-                                                    .set_response_code(ResponseCode::ServFail);
+                                                response_header.set_response_code(
+                                                    if e.is_nx_domain() {
+                                                        ResponseCode::NXDomain
+                                                    } else {
+                                                        ResponseCode::ServFail
+                                                    },
+                                                );
                                                 let mut res = DnsResponse::empty();
                                                 res.add_query(original.to_owned());
                                                 res
@@ -552,4 +557,87 @@ fn build_middleware(
     };
 
     Arc::new(middleware_handler)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dns::{RData, Record, RecordType};
+    use crate::dns_error::LookupError;
+    use crate::dns_mw::DnsMockMiddleware;
+    use crate::libdns::proto::{
+        AuthorityData, NoRecords, ProtoErrorKind,
+        op::{Message, MessageType, OpCode, Query, ResponseCode},
+        rr::rdata::{CNAME, SOA},
+    };
+
+    #[tokio::test]
+    async fn test_query_final_packet_preserves_response_codes() {
+        let query = Query::query("alias.example.".parse().unwrap(), RecordType::A);
+        let mut cases: Vec<(ResponseCode, Result<DnsResponse, LookupError>)> = Vec::new();
+        for code in [
+            ResponseCode::NoError,
+            ResponseCode::NXDomain,
+            ResponseCode::ServFail,
+            ResponseCode::Refused,
+        ] {
+            let authority = AuthorityData::new(Box::new(query.clone()), None, true, false, None);
+            let mut no_records: NoRecords = authority.into();
+            no_records.response_code = code;
+            cases.push((code, Err(ProtoErrorKind::NoRecordsFound(no_records).into())));
+        }
+        cases.push((ResponseCode::ServFail, Err(ProtoErrorKind::Timeout.into())));
+        cases.push((ResponseCode::NXDomain, Err(ResponseCode::NXDomain.into())));
+
+        let mut response = DnsResponse::new_with_max_ttl(
+            query.clone(),
+            [Record::from_rdata(
+                query.name().clone(),
+                30,
+                RData::CNAME(CNAME("missing.example.".parse().unwrap())),
+            )],
+        );
+        response.set_response_code(ResponseCode::NXDomain);
+        response.add_authority(Record::from_rdata(
+            "example.".parse().unwrap(),
+            30,
+            RData::SOA(SOA::new(
+                "ns.example.".parse().unwrap(),
+                "hostmaster.example.".parse().unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                30,
+            )),
+        ));
+        cases.push((ResponseCode::NXDomain, Ok(response)));
+
+        for (code, result) in cases {
+            let answers = result
+                .as_ref()
+                .map(|r| r.answers().to_vec())
+                .unwrap_or_default();
+            let authorities = result
+                .as_ref()
+                .map(|r| r.authorities().to_vec())
+                .unwrap_or_default();
+            let handler = Arc::new(
+                DnsMockMiddleware::builder()
+                    .with_result(query.clone(), result)
+                    .build(RuntimeConfig::default()),
+            );
+            let mut request = Message::new(1234, MessageType::Query, OpCode::Query);
+            request.set_recursion_desired(true);
+            request.add_query(query.clone());
+            let packet = process(handler, request.into(), ServerOpts::default()).await;
+            let bytes: Vec<u8> = packet.try_into().unwrap();
+            let response = Message::from_vec(&bytes).unwrap();
+            assert_eq!(response.id(), 1234);
+            assert_eq!(response.response_code(), code);
+            assert_eq!(response.queries(), std::slice::from_ref(&query));
+            assert_eq!(response.answers(), answers);
+            assert_eq!(response.authorities(), authorities);
+        }
+    }
 }

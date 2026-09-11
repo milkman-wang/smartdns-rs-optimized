@@ -511,7 +511,7 @@ impl NeighborStore {
         #[cfg(windows)]
         {
             let status = std::process::Command::new("cmd")
-                .args(&["/c", "exit", "0"])
+                .args(["/c", "exit", "0"])
                 .status()
                 .unwrap();
             Ok(std::process::Output {
@@ -1186,9 +1186,6 @@ mod tests {
         // Don't initialize, just test empty cache
         let ipv6: IpAddr = "2402:4e00:1013:e500:0:9671:f018:4947".parse().unwrap();
         let _rdata = store.reverse_lookup(&ipv6);
-
-        // Should return None for empty cache
-        assert!(true); // Just verifying it doesn't panic
     }
 
     #[test]

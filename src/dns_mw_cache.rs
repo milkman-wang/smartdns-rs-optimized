@@ -176,10 +176,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
 
         let query = req.query().original().to_owned();
 
-        let cached_res = if ctx.server_opts.is_background {
-            // for background quering, we don't use cache
-            None
-        } else {
+        if !ctx.server_opts.is_background {
             let no_serve_expired = ctx
                 .domain_rule
                 .get(|r| r.no_serve_expired)
@@ -221,12 +218,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                             ctx.source = LookupFrom::Cache;
                             return Ok(res);
                         }
-                        _ => Some(res),
+                        _ => (),
                     }
                 }
-                _ => None,
+                _ => (),
             }
-        };
+        }
 
         let res = next.run(ctx, req).await;
 
@@ -276,13 +273,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                 }
                 Ok(lookup)
             }
-            Err(err) => {
-                // fallback to expired result.
-                if let Some(res) = cached_res {
-                    return Ok(res);
-                }
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -558,7 +549,18 @@ impl DnsCache {
     async fn get(&self, query: &Query, now: Instant) -> Option<(DnsResponse, CacheStatus)> {
         let mut cache = self.cache.lock().await;
 
-        cache.get_mut(query).map(|value| {
+        let value = cache.get_mut(query)?;
+        if !value.is_current(now)
+            && (!self.serve_expired
+                || (self.expired_ttl > 0
+                    && now.duration_since(value.valid_until)
+                        > Duration::from_secs(self.expired_ttl)))
+        {
+            cache.pop(query);
+            return None;
+        }
+
+        Some({
             value.stats.hit();
             let mut res = value.data.clone();
 
@@ -906,6 +908,88 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn test_query_stale_cache_policy_is_kept_on_upstream_failure() {
+        use crate::dns_mw::DnsMockMiddleware;
+        for policy in [
+            "serve-expired no",
+            "domain-rule /expired.example/ -no-serve-expired",
+            "serve-expired-ttl 2",
+        ] {
+            let cfg = Arc::new(
+                RuntimeConfig::builder()
+                    .with("serve-expired yes")
+                    .with("prefetch-domain no")
+                    .with("cache-persist no")
+                    .with(policy)
+                    .build()
+                    .unwrap(),
+            );
+            let (mut background_rx, background_handle) = DnsHandle::new();
+            let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
+            let query = Query::query("expired.example.".parse().unwrap(), RecordType::A);
+            let record = Record::from_rdata(
+                query.name().clone(),
+                30,
+                RData::A("192.0.2.1".parse().unwrap()),
+            );
+            cache_middleware
+                .cache()
+                .insert(
+                    query.clone(),
+                    vec![(record, 30)],
+                    Instant::now() - Duration::from_secs(40),
+                    "default",
+                )
+                .await;
+            let error = DnsError::no_records_found(query.clone(), 1);
+            let handler = DnsMockMiddleware::mock(cache_middleware)
+                .with_result(query.clone(), Err(error.clone()))
+                .build(cfg);
+            assert_eq!(
+                handler
+                    .lookup(query.name().clone(), RecordType::A)
+                    .await
+                    .unwrap_err(),
+                error,
+                "{policy}"
+            );
+            assert!(background_rx.try_recv().is_err(), "{policy}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_stale_cache_age_limit_and_unlimited_default() {
+        let query = Query::query("expired.example.".parse().unwrap(), RecordType::A);
+        let record = Record::from_rdata(
+            query.name().clone(),
+            30,
+            RData::A("192.0.2.1".parse().unwrap()),
+        );
+        let now = Instant::now();
+        for (limit, age, allowed) in [(2, 32, true), (2, 33, false), (0, 86400, true)] {
+            let cache = DnsCache::new(10, true, limit, 5);
+            cache
+                .insert(query.clone(), vec![(record.clone(), 30)], now, "default")
+                .await;
+            let response = cache.get(&query, now + Duration::from_secs(age)).await;
+            if allowed {
+                let (response, status) = response.unwrap();
+                assert!(matches!(status, CacheStatus::Expired));
+                assert_eq!(
+                    response.records(),
+                    &[Record::from_rdata(
+                        query.name().clone(),
+                        5,
+                        record.data().clone()
+                    )]
+                );
+            } else {
+                assert!(response.is_none());
+            }
+        }
+    }
+
     struct CountingUpstream {
         queries: Arc<AtomicUsize>,
     }
@@ -944,7 +1028,7 @@ mod tests {
 
     #[test]
     fn test_lookup_serde() {
-        let lookups = vec![
+        let lookups = [
             create_lookup(
                 "abc.exmample.com.",
                 RData::A("127.0.0.1".parse().unwrap()),

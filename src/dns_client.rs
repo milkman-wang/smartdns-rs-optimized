@@ -374,8 +374,8 @@ mod name_server_group {
                 Ok(response) => {
                     empty_response.get_or_insert(response);
                 }
-                Err(err) if err.is_no_records_found() && !prefer_nonempty => return Err(err),
-                Err(err) if err.is_no_records_found() => {
+                Err(err) if err.is_negative_response() && !prefer_nonempty => return Err(err),
+                Err(err) if err.is_negative_response() => {
                     no_records_error.get_or_insert(err);
                 }
                 Err(err) => last_error = Some(err),
@@ -904,6 +904,37 @@ mod tests {
     use std::str::FromStr;
 
     #[tokio::test]
+    async fn test_query_non_ip_upstream_failure_does_not_hide_success() {
+        use crate::libdns::proto::rr::RData;
+        use futures_util::FutureExt as _;
+        use std::time::Duration;
+        let query = Query::query("txt.example.".parse().unwrap(), RecordType::TXT);
+        let authority = AuthorityData::new(Box::new(query.clone()), None, true, false, None);
+        let mut no_records: crate::libdns::proto::NoRecords = authority.into();
+        no_records.response_code = ResponseCode::ServFail;
+        let record = Record::from_rdata(
+            query.name().clone(),
+            30,
+            RData::TXT(crate::libdns::proto::rr::rdata::TXT::new(vec![
+                "available".into(),
+            ])),
+        );
+        let response = DnsResponse::new_with_max_ttl(query, [record.clone()]);
+        let tasks = vec![
+            async { Err(ProtoErrorKind::NoRecordsFound(no_records).into()) }.boxed(),
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(response)
+            }
+            .boxed(),
+        ];
+        let response = super::name_server_group::select_response(tasks, false)
+            .await
+            .unwrap();
+        assert_eq!(response.answers(), &[record]);
+    }
+
+    #[tokio::test]
     async fn test_nameserver_group_preserves_empty_response_over_late_error() {
         use futures_util::FutureExt as _;
         use tokio::time::{Duration, sleep};
@@ -965,7 +996,7 @@ mod tests {
         .expect("a valid NODATA response should return before another server times out")
         .expect_err("the result should remain a no-records response");
 
-        assert!(err.is_no_records_found());
+        assert!(err.is_negative_response());
     }
 
     #[tokio::test]

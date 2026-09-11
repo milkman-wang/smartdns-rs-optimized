@@ -245,7 +245,7 @@ fn limit_remaining_queries<'a>(
             response.response_code(),
             ResponseCode::NoError | ResponseCode::NXDomain
         ),
-        Err(error) => error.is_no_records_found() || error.is_nx_domain(),
+        Err(error) => error.is_negative_response(),
     };
     if *received_response || !valid_response {
         return;
@@ -454,30 +454,20 @@ async fn select_ip_response(
                     .map(|(ip, _)| ip),
             }
         }
-        FastestResponse => {
-            let mut last_error = None;
-            loop {
-                let (res, _idx, rest) = select_all(query_tasks).await;
-                if let Ok(response) = &res
-                    && response.response_code() == ResponseCode::NoError
-                {
-                    return res;
-                }
-
-                if rest.is_empty() {
-                    return res;
-                }
-
-                if let Err(err) = res {
-                    if matches!(last_error, Some(e) if e == err) {
-                        return Err(err);
-                    } else {
-                        last_error = Some(err);
-                    }
-                }
-                query_tasks = rest;
+        FastestResponse => loop {
+            let (res, _idx, rest) = select_all(query_tasks).await;
+            let valid_response = match &res {
+                Ok(response) => matches!(
+                    response.response_code(),
+                    ResponseCode::NoError | ResponseCode::NXDomain
+                ),
+                Err(error) => error.is_negative_response(),
+            };
+            if valid_response || rest.is_empty() {
+                return res;
             }
-        }
+            query_tasks = rest;
+        },
     };
 
     if let Some(selected_ip) = selected_ip {
@@ -486,7 +476,10 @@ async fn select_ip_response(
                 .take_answers()
                 .into_iter()
                 .find(|r| matches!(r.data().ip_addr(), Some(ip) if ip == selected_ip));
-            if let Some(record) = record {
+            if let Some(mut record) = record {
+                // Selection removes the CNAME chain, so the IP must answer the
+                // original name on cold lookups as it already does from cache.
+                record.set_name(name.clone());
                 res.add_answer(record);
                 return Ok(res);
             }
@@ -635,10 +628,12 @@ async fn per_nameserver_lookup_ip(
             let answers = {
                 let mut new_ans = Vec::new();
                 let mut alias_set = Vec::new(); // dedup
-                for record in answers {
+                for mut record in answers {
                     let Some(ip) = record.data().ip_addr().filter(ip_filter) else {
                         continue;
                     };
+                    // IP filtering also removes any CNAME records.
+                    record.set_name(query.name().clone());
                     match ip_alias.get(&ip) {
                         None => new_ans.push(record),
                         Some(ip) if !alias_set.contains(&ip.as_ptr()) => {
@@ -695,6 +690,159 @@ mod tests {
             })
             .collect();
         DnsResponse::new_with_max_ttl(Query::query(name, record_type), records)
+    }
+
+    #[tokio::test]
+    async fn test_speed_response_cname_answers_use_query_name() {
+        let name: Name = "alias.example.".parse().unwrap();
+        let canonical: Name = "cdn.example.".parse().unwrap();
+        for (record_type, ips) in [
+            (RecordType::A, ["192.0.2.1", "192.0.2.2"]),
+            (RecordType::AAAA, ["2001:db8::1", "2001:db8::2"]),
+        ] {
+            let ips = ips.map(|ip| ip.parse::<IpAddr>().unwrap());
+            for mode in [ResponseMode::FirstPing, ResponseMode::FastestIp] {
+                let response = DnsResponse::new_with_max_ttl(
+                    Query::query(name.clone(), record_type),
+                    vec![
+                        Record::from_rdata(
+                            name.clone(),
+                            60,
+                            RData::CNAME(crate::libdns::proto::rr::rdata::CNAME(canonical.clone())),
+                        ),
+                        Record::from_rdata(canonical.clone(), 60, RData::from(ips[0])),
+                        Record::from_rdata(canonical.clone(), 60, RData::from(ips[1])),
+                    ],
+                );
+                let response = select_ip_response(
+                    name.clone(),
+                    mode,
+                    &[],
+                    vec![async { Ok(response) }.boxed()],
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(response.query().name(), &name);
+                assert_eq!(response.answers().len(), 1);
+                assert_eq!(response.answers()[0].name(), &name);
+                assert_eq!(response.answers()[0].record_type(), record_type);
+                assert!(ips.contains(&response.ip_addrs()[0]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ip_filter_cname_answers_use_query_name() {
+        use crate::config::NameServerInfo;
+        use crate::dns_url::DnsUrl;
+        use crate::libdns::proto::op::Message;
+        use crate::libdns::proto::rr::rdata::CNAME;
+
+        for (record_type, ip) in [
+            (RecordType::A, "192.0.2.1".parse::<IpAddr>().unwrap()),
+            (RecordType::AAAA, "2001:db8::1".parse().unwrap()),
+        ] {
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let url: DnsUrl = format!("udp://{}", socket.local_addr().unwrap())
+                .parse()
+                .unwrap();
+            let mut config = NameServerInfo::from(url);
+            config.blacklist_ip = true;
+            let server = NameServer::new(config, None, None, None, None).unwrap();
+            let upstream = tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                let (len, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                let request = Message::from_vec(&buffer[..len]).unwrap();
+                let name = request.queries()[0].name().clone();
+                let canonical: Name = "cdn.example.".parse().unwrap();
+                let mut response = request.to_response();
+                response.set_recursion_available(true);
+                response.add_answer(Record::from_rdata(
+                    name,
+                    60,
+                    RData::CNAME(CNAME(canonical.clone())),
+                ));
+                response.add_answer(Record::from_rdata(canonical, 60, RData::from(ip)));
+                socket
+                    .send_to(&response.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            });
+            let name: Name = "alias.example.".parse().unwrap();
+            let options = LookupIpOptions {
+                response_strategy: ResponseMode::FastestResponse,
+                speed_check_mode: None,
+                no_speed_check: true,
+                ignore_ip: Default::default(),
+                whitelist_ip: Default::default(),
+                blacklist_ip: Default::default(),
+                ip_alias: Default::default(),
+                lookup_options: LookupOptions {
+                    record_type,
+                    ..Default::default()
+                },
+            };
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                per_nameserver_lookup_ip(&server, name.clone(), &options),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            upstream.await.unwrap();
+
+            assert_eq!(response.answers().len(), 1);
+            assert_eq!(response.answers()[0].name(), &name);
+            assert_eq!(response.answers()[0].record_type(), record_type);
+            assert_eq!(response.ip_addrs(), vec![ip]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_upstream_failures_do_not_cancel_late_success() {
+        for mode in [
+            ResponseMode::FastestResponse,
+            ResponseMode::FirstPing,
+            ResponseMode::FastestIp,
+        ] {
+            for code in [ResponseCode::ServFail, ResponseCode::Refused] {
+                let answer = speed_test_response(&["192.0.2.1"], RecordType::A);
+                let query = answer.query().clone();
+                let authority =
+                    AuthorityData::new(Box::new(query.clone()), None, true, false, None);
+                let mut no_records: crate::libdns::proto::NoRecords = authority.into();
+                no_records.response_code = code;
+                let error: LookupError = ProtoErrorKind::NoRecordsFound(no_records).into();
+                let other_error = error.clone();
+                let tasks = vec![
+                    async { Err(error) }.boxed(),
+                    async {
+                        sleep(Duration::from_millis(20)).await;
+                        Err(other_error)
+                    }
+                    .boxed(),
+                    async {
+                        sleep(Duration::from_millis(350)).await;
+                        Ok(answer)
+                    }
+                    .boxed(),
+                ];
+                let response = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    select_ip_response(query.name().clone(), mode, &[], tasks),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(response.response_code(), ResponseCode::NoError);
+                assert_eq!(response.query(), &query);
+                assert_eq!(
+                    response.ip_addrs(),
+                    vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+                );
+            }
+        }
     }
 
     #[tokio::test]

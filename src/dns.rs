@@ -523,7 +523,12 @@ mod response {
 
         pub fn into_message(self, header: Option<Header>) -> Message {
             let mut message = self.message;
-            if let Some(header) = header {
+            if let Some(mut header) = header {
+                // Preserve the lookup's response code unless the caller has
+                // supplied a processing error, such as a timeout.
+                if header.response_code() == op::ResponseCode::NoError {
+                    header.set_response_code(message.response_code());
+                }
                 message.set_header(header);
             }
             message

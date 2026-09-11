@@ -38,8 +38,20 @@ impl PartialEq for LookupError {
 }
 
 impl LookupError {
-    pub fn is_no_records_found(&self) -> bool {
-        matches!(self, Self::Proto(err) if matches!(err.kind(), ProtoErrorKind::NoRecordsFound(_)))
+    /// Whether this is a valid NODATA or NXDOMAIN response, rather than an upstream failure.
+    pub fn is_negative_response(&self) -> bool {
+        self.is_nx_domain()
+            || matches!(
+                self,
+                Self::Proto(err)
+                    if matches!(
+                        err.kind(),
+                        ProtoErrorKind::NoRecordsFound(NoRecords {
+                            response_code: ResponseCode::NoError,
+                            ..
+                        })
+                    )
+            )
     }
 
     pub fn is_nx_domain(&self) -> bool {

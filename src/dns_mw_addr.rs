@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use crate::dns::*;
@@ -27,13 +26,15 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
             let name = query.name().to_owned();
             let valid_until = Instant::now() + Duration::from_secs(local_ttl);
 
-            let lookup = DnsResponse::new_with_deadline(
-                query,
-                rdatas
-                    .into_iter()
-                    .map(|d| Record::from_rdata(name.clone(), local_ttl as u32, d)),
-                valid_until,
-            );
+            let mut lookup = DnsResponse::new_with_deadline(query, [], valid_until);
+            for data in rdatas {
+                let record = Record::from_rdata(name.clone(), local_ttl as u32, data);
+                if record.record_type() == RecordType::SOA {
+                    lookup.add_authority(record);
+                } else {
+                    lookup.add_answer(record);
+                }
+            }
 
             ctx.source = LookupFrom::Static;
             return Ok(lookup);
@@ -42,8 +43,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
         let res = next.run(ctx, req).await;
 
         match res {
-            Ok(lookup) => Ok({
-                let mut records = Cow::Borrowed(lookup.records());
+            Ok(mut lookup) => Ok({
+                let records = lookup.answers_mut();
 
                 if query_type.is_ip_addr()
                     && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
@@ -62,7 +63,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
 
                     match truncate {
                         Some(truncate) if records.len() > truncate => {
-                            records.to_mut().truncate(truncate);
+                            records.truncate(truncate);
                         }
                         _ => (),
                     }
@@ -84,7 +85,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
 
                 if rr_ttl_min.is_some() || rr_ttl_max.is_some() || rr_ttl_reply_max.is_some() {
-                    for record in records.to_mut() {
+                    for record in records.iter_mut() {
                         if let Some(rr_ttl_min) = rr_ttl_min {
                             record.set_min_ttl(rr_ttl_min);
                         }
@@ -96,14 +97,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                     }
                 }
 
-                match records {
-                    Cow::Owned(records) => DnsResponse::new_with_deadline(
-                        lookup.query().clone(),
-                        records,
-                        lookup.valid_until(),
-                    ),
-                    Cow::Borrowed(_) => lookup,
-                }
+                lookup
             }),
             Err(err) => Err(err),
         }
@@ -214,6 +208,86 @@ mod tests {
         },
     };
 
+    #[tokio::test]
+    async fn test_query_forced_soa_uses_authority_section() {
+        for (rule, query_type) in [
+            ("force-qtype-SOA 65", RecordType::HTTPS),
+            ("address /blocked.example/#", RecordType::A),
+            ("force-AAAA-SOA yes", RecordType::AAAA),
+        ] {
+            let cfg = RuntimeConfig::builder()
+                .with(rule)
+                .with("local-ttl 30")
+                .build()
+                .unwrap();
+            let handler = DnsMockMiddleware::mock(AddressMiddleware).build(cfg);
+            let response = handler
+                .lookup("blocked.example.", query_type)
+                .await
+                .unwrap();
+            assert!(response.answers().is_empty());
+            assert_eq!(response.response_code(), op::ResponseCode::NoError);
+            assert_eq!(
+                response.authorities(),
+                &[Record::from_rdata(
+                    "blocked.example.".parse().unwrap(),
+                    30,
+                    RData::default_soa()
+                )]
+            );
+        }
+
+        let handler = DnsMockMiddleware::mock(AddressMiddleware)
+            .with_rdata("example.", RData::default_soa(), 30)
+            .build(RuntimeConfig::default());
+        let response = handler.lookup("example.", RecordType::SOA).await.unwrap();
+        assert_eq!(response.answers().len(), 1);
+        assert_eq!(response.answers()[0].data(), &RData::default_soa());
+        assert!(response.authorities().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_ttl_adjustment_preserves_negative_response() {
+        let query = Query::query("alias.example.".parse().unwrap(), RecordType::AAAA);
+        let mut response = DnsResponse::new_with_max_ttl(
+            query.clone(),
+            [Record::from_rdata(
+                query.name().clone(),
+                1,
+                RData::CNAME(rdata::CNAME("target.example.".parse().unwrap())),
+            )],
+        );
+        response.set_response_code(op::ResponseCode::NXDomain);
+        let soa = Record::from_rdata("example.".parse().unwrap(), 1, RData::default_soa());
+        let additional = Record::from_rdata(
+            "ns.example.".parse().unwrap(),
+            30,
+            RData::A("192.0.2.53".parse().unwrap()),
+        );
+        response.add_authority(soa.clone());
+        response.add_additional(additional.clone());
+        let cfg = RuntimeConfig::builder()
+            .with("rr-ttl-min 600")
+            .build()
+            .unwrap();
+        let handler = DnsMockMiddleware::mock(AddressMiddleware)
+            .with_result(query.clone(), Ok(response))
+            .build(cfg);
+        let response = handler
+            .lookup(query.name().clone(), RecordType::AAAA)
+            .await
+            .unwrap();
+        assert_eq!(response.response_code(), op::ResponseCode::NXDomain);
+        assert_eq!(response.answers().len(), 1);
+        assert_eq!(response.answers()[0].ttl(), 600);
+        assert_eq!(
+            response.answers()[0].data(),
+            &RData::CNAME(rdata::CNAME("target.example.".parse().unwrap()))
+        );
+        assert_eq!(response.authorities(), &[soa]);
+        assert_eq!(response.additionals(), &[additional]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_address_rule_soa_v6() {
         let cfg = RuntimeConfig::builder()
@@ -235,12 +309,10 @@ mod tests {
             .with_aaaa_record("google.com", "2001:4860:4860::8888".parse().unwrap())
             .build(cfg);
 
-        assert!(matches!(
-            mock.lookup_rdata("google.com", RecordType::AAAA)
-                .await
-                .unwrap()[0],
-            RData::SOA(_)
-        ));
+        let response = mock.lookup("google.com", RecordType::AAAA).await.unwrap();
+        assert!(response.answers().is_empty());
+        assert_eq!(response.authorities().len(), 1);
+        assert_eq!(response.authorities()[0].data(), &RData::default_soa());
         assert_eq!(
             mock.lookup_rdata("google.com", RecordType::A)
                 .await
