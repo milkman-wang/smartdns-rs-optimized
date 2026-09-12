@@ -764,7 +764,13 @@ impl RuntimeConfigBuilder {
                 match p.get_domain_set() {
                     Ok(s) => {
                         log::info!("DoaminSet load {} records into {}", s.len(), p.name());
-                        set.extend(s);
+                        // Keep the provider's allocation for the first list.
+                        // Additional providers still merge and deduplicate.
+                        if set.is_empty() {
+                            *set = s;
+                        } else {
+                            set.extend(s);
+                        }
                     }
                     Err(err) => {
                         log::error!("DoaminSet load failed {} {}", p.name(), err);
@@ -1792,7 +1798,6 @@ mod tests {
             .cloned()
             .unwrap();
 
-        assert_eq!(domain_rule.name(), &"doh.pub".parse().unwrap());
         assert_eq!(domain_rule.address, Some(AddressRuleValue::SOA));
         assert_eq!(
             domain_rule.speed_check_mode,

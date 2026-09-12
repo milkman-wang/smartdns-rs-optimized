@@ -1,0 +1,31 @@
+{
+  "date": "2026-09-12",
+  "domains": {"china": 113246, "gfw_lines": 28380},
+  "allocation_probe": {
+    "platform": "Windows x86_64 GNU, debug test, tracked System allocator",
+    "scope": "Both router domain lists with representative Passwall domain rules; excludes running DNS cache/upstream I/O",
+    "sizes_bytes": {"DomainRule": 512, "WildcardName": 88, "DomainRuleTreeNode": 104},
+    "before": {"expanded_live": 186093543, "sorted_live": 113384983, "assembled_live": 36029513, "built_live": 21441361, "dropped_live": 4040, "peak": 272215955},
+    "after": {"expanded_live": 40033273, "sorted_live": 28179689, "assembled_live": 36029513, "built_live": 21441361, "dropped_live": 4040, "peak": 53607673},
+    "borrowed_names_only": {"expanded_live": 19057637, "sorted_live": 16863573, "assembled_live": 36029475, "built_live": 21441323, "dropped_live": 4002, "peak": 38291875},
+    "compact_nodes_and_reused_provider_set": {"DomainRuleTreeNode_bytes": 16, "expanded_live": 19057637, "sorted_live": 16863573, "assembled_live": 23582373, "built_live": 8994221, "dropped_live": 4002, "peak": 27218325}
+  },
+  "router": {
+    "platform": "AP8220, QWRT 21.02, ARM64, Linux 5.4",
+    "rust_24_1_production_rss_kib": 372724,
+    "c_release_48_4_isolated_same_lists_rss_kib": 54532,
+    "rust_24_2_production_startup_rss_kib": 90164,
+    "rust_24_2_after_queries_rss_kib": 90476,
+    "rust_24_2_before_second_round_rss_kib": 90844,
+    "rust_24_3_production_startup_rss_kib": 47004,
+    "rust_24_3_after_queries_rss_kib": 48680,
+    "rust_24_3_after_queries_available_kib": 423816,
+    "rust_24_3_final_rss_kib": 48940,
+    "rust_24_3_final_available_kib": 438608,
+    "system_available_before_kib": 116092,
+    "system_available_after_kib": 384508,
+    "c_scope": "127.0.0.1:15853, same full CN/GFW lists, cache capacity 16000, UDP/TCP A query validated; isolated representative config, not production traffic"
+  },
+  "validation": {"unit_passed": 352, "unit_ignored": 1, "clippy": "passed", "aarch64_build": "passed", "full_config_check_while_serving": "passed; service PID unchanged", "jd_ipv4_ipv6": [200,200], "xiaohongshu_ipv4_ipv6": [302,302], "douyin_ipv4_ipv6": [200,200], "google_through_socks": 204},
+  "validation_24_3": {"unit_passed": 353, "unit_ignored": 1, "clippy": "passed", "aarch64_build": "passed; existing PGO data, changed control-flow counts discarded", "full_config_check": "passed before installation; old service PID unchanged", "config_files": "UCI and custom.conf byte-identical to backup", "dns_ports_ipv4_ipv6_tcp_udp": [53,15354,15355,6553], "jd_ipv4_ipv6": [200,200], "xiaohongshu_ipv4_ipv6": [302,302], "douyin_ipv4_ipv6": [200,200], "google_through_socks": 204, "ipset_membership": "JD A answer in passwall_chn; all eight Google A answers in passwall_gfw", "live_pid": 18010}
+}

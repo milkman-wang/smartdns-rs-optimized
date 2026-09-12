@@ -1,0 +1,45 @@
+--- a/usr/share/passwall/app.sh
++++ b/usr/share/passwall/app.sh
+@@ -1465,6 +1465,14 @@
+ 		dnsmasq_version=$(dnsmasq -v | grep -i "Dnsmasq version " | awk '{print $3}')
+ 		[ "$(expr $dnsmasq_version \>= 2.87)" == 0 ] && echolog "Dnsmasq版本低于2.87，有可能无法正常使用！！！"
+ 	}
++
++	# SmartDNS owns the client DNS port; redirect there without a dnsmasq copy.
++	if [ "${DNS_SHUNT}" = "smartdns" ] && [ "$(uci -q get smartdns.@smartdns[0].port)" = "53" ]; then
++		DNS_REDIRECT_PORT=53
++		set_cache_var "ACL_default_dns_port" "53"
++		echolog "  - DNS requests redirected directly to SmartDNS:53"
++		return 0
++	fi
+ 
+ 	local DNSMASQ_TUN_DNS=$(get_first_dns TUN_DNS 53 | sed -E 's/^\[([^]]+)\]:(.*)$/\1#\2/; t; s/^([^:]+):([0-9]+)$/\1#\2/')
+ 	local RUN_NEW_DNSMASQ=1
+--- a/usr/share/passwall/helper_smartdns_add.lua
++++ b/usr/share/passwall/helper_smartdns_add.lua
+@@ -131,7 +131,6 @@
+ 		{key = "rr_ttl", config_key = "rr-ttl", prefix = "-rr-ttl "},
+ 		{key = "rr_ttl_min", config_key = "rr-ttl-min", prefix = "-rr-ttl-min "},
+ 		{key = "rr_ttl_max", config_key = "rr-ttl-max", prefix = "-rr-ttl-max "},
+-		{key = "rr_ttl_reply_max", config_key = "rr-ttl-reply-max", prefix = "-rr-ttl-reply-max "},
+ 		{
+ 			key = "force_aaaa_soa",
+ 			config_key = "force-qtype-SOA",
+@@ -191,8 +190,8 @@
+ local force_https_soa = uci:get(appname, "@global[0]", "force_https_soa") or 0
+ local proxy_server_name = "passwall-proxy-server"
+ config_lines = {
+-	tonumber(LISTEN_PORT) ~= 0 and "bind [::]:" .. LISTEN_PORT .. "@lo" or "",
+-	(tonumber(LOCAL_PORT) ~= 0 and LOCAL_GROUP) and "bind [::]:" .. LOCAL_PORT .. "@lo -group " ..  LOCAL_GROUP or "",
++	tonumber(LISTEN_PORT) ~= 0 and string.format("bind 127.0.0.1:%s\nbind [::1]:%s\nbind-tcp 127.0.0.1:%s\nbind-tcp [::1]:%s", LISTEN_PORT, LISTEN_PORT, LISTEN_PORT, LISTEN_PORT) or "",
++	(tonumber(LOCAL_PORT) ~= 0 and LOCAL_GROUP) and string.format("bind 127.0.0.1:%s -group %s\nbind [::1]:%s -group %s\nbind-tcp 127.0.0.1:%s -group %s\nbind-tcp [::1]:%s -group %s", LOCAL_PORT, LOCAL_GROUP, LOCAL_PORT, LOCAL_GROUP, LOCAL_PORT, LOCAL_GROUP, LOCAL_PORT, LOCAL_GROUP) or "",
+ 	tonumber(force_https_soa) == 1 and "force-qtype-SOA 65" or "force-qtype-SOA -,65",
+ 	"server 114.114.114.114 -bootstrap-dns",
+ 	is_file_nonzero("/etc/hosts") and "hosts-file /etc/hosts" or "",
+@@ -692,5 +691,5 @@
+ end
+ 
+ fs.symlink(TMP_CONF_FILE, SMARTDNS_CONF)
+-sys.call(string.format('echo "conf-file %s" >> /etc/smartdns/custom.conf', string.gsub(SMARTDNS_CONF, appname, appname .. "*")))
++sys.call(string.format('echo "conf-file %s" >> /etc/smartdns/custom.conf', SMARTDNS_CONF))
+ log("  - SmartDNS已作为Dnsmasq上游，如果你自行配置了错误的DNS流程，将会导致域名(直连/代理域名)分流失效！！！")

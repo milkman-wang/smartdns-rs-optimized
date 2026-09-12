@@ -166,24 +166,24 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsNftsetMidd
         let updates = updates(ctx, &response);
         if !updates.is_empty() {
             let debug = ctx.cfg().nftset_debug;
-            tokio::spawn(async move {
-                for update in updates {
-                    if debug {
-                        crate::log::info!("network set update: {:?}", update);
-                    }
-                    let result: anyhow::Result<()> = match &update {
-                        SetUpdate::IpSet(set, ip, timeout) => {
-                            crate::infra::kernel_ipset::add(&set.0, *ip, *timeout)
-                                .await
-                                .map_err(Into::into)
-                        }
-                        SetUpdate::NftSet(set, ip, timeout) => add_nftset(set, *ip, *timeout).await,
-                    };
-                    if let Err(error) = result {
-                        crate::log::warn!("network set {:?}: {}", update, error);
-                    }
+            // Clients can connect as soon as they receive the answer. Install
+            // routing entries first so their first connection uses these rules.
+            for update in updates {
+                if debug {
+                    crate::log::info!("network set update: {:?}", update);
                 }
-            });
+                let result: anyhow::Result<()> = match &update {
+                    SetUpdate::IpSet(set, ip, timeout) => {
+                        crate::infra::kernel_ipset::add(&set.0, *ip, *timeout)
+                            .await
+                            .map_err(Into::into)
+                    }
+                    SetUpdate::NftSet(set, ip, timeout) => add_nftset(set, *ip, *timeout).await,
+                };
+                if let Err(error) = result {
+                    crate::log::warn!("network set {:?}: {}", update, error);
+                }
+            }
         }
         Ok(response)
     }
@@ -201,6 +201,60 @@ mod tests {
     use crate::dns_conf::RuntimeConfig;
     use crate::libdns::proto::op::Query;
     use std::sync::Arc;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires root and ipset"]
+    async fn test_ipset_ready_before_dns_response() {
+        use crate::dns_mw::DnsMockMiddleware;
+        use std::process::Command;
+
+        let name = format!("smartdns_order_{}", std::process::id());
+        assert!(
+            Command::new("ipset")
+                .args(["create", &name, "hash:ip"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("ipset").args(["destroy", &self.0]).status();
+            }
+        }
+        let _cleanup = Cleanup(name.clone());
+        let cfg = RuntimeConfig::builder()
+            .with(&format!("ipset /route.test/{name}"))
+            .build()
+            .unwrap();
+        let handler = DnsMockMiddleware::mock(DnsNftsetMiddleware)
+            .with_multi_records(
+                "route.test",
+                RecordType::A,
+                vec![Record::from_rdata(
+                    "route.test".parse().unwrap(),
+                    60,
+                    RData::A("192.0.2.78".parse().unwrap()),
+                )],
+            )
+            .build(cfg);
+
+        let response = handler.lookup("route.test", RecordType::A).await.unwrap();
+        assert_eq!(
+            response.ip_addrs(),
+            vec!["192.0.2.78".parse::<IpAddr>().unwrap()]
+        );
+        // This blocking read intentionally gives no spawned task a chance to
+        // run on the single-thread runtime after the DNS response is returned.
+        assert!(
+            Command::new("ipset")
+                .args(["test", &name, "192.0.2.78"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 
     #[test]
     fn test_all_network_set_configuration_sources_enable_middleware() {
