@@ -16,6 +16,8 @@ WebUI 版通过 `webui` Cargo feature 加入管理模块和页面资源；两者
 Release 和目标平台压缩包，不会把 WebUI 版换成无界面版。发布构建从
 `SMARTDNS_RELEASE_REPOSITORY` 读取所属仓库；未设置时使用 Cargo 清单中的仓库地址。
 
+本 fork 的仓库地址为 `milkman-wang/smartdns-rs-optimized`。本地构建的自更新默认使用该仓库，GitHub Actions 则从 `github.repository` 注入地址。仓库改名不改变可执行程序 `smartdns`、OpenWrt 包名、UCI 服务名或既有 Release 标签；上游同步仍跟踪 `mokeyish/smartdns-rs`。
+
 ## 构建
 
 ```sh

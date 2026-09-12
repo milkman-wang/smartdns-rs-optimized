@@ -1,7 +1,7 @@
-# SmartDNS-rs
+# SmartDNS-rs Optimized
 
-![Test](https://github.com/milkman-wang/smartdns-rs/actions/workflows/test.yml/badge.svg?branch=main)
-[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/milkman-wang/smartdns-rs?display_name=tag&include_prereleases)](https://github.com/milkman-wang/smartdns-rs/releases)
+![Test](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/test.yml/badge.svg?branch=main)
+[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/milkman-wang/smartdns-rs-optimized?display_name=tag&include_prereleases)](https://github.com/milkman-wang/smartdns-rs-optimized/releases)
 ![OS](https://img.shields.io/badge/os-Windows%20%7C%20MacOS%20%7C%20Linux-blue)
 
 [Docs](docs/C_FEATURE_COMPATIBILITY.md) · [C SmartDNS upstream docs](https://pymumu.github.io/smartdns/en/)
@@ -12,11 +12,11 @@ SmartDNS-rs is a local DNS server that queries multiple upstream resolvers and c
 
 This fork focuses on router CPU efficiency, cold-query and cache performance, native Rust DNS features, and OpenWrt integration. Changes maintained here through **2026-09-12** include UDP connection reuse, fewer response allocations, TTL/encoded-response reuse within the cache budget, a single-worker runtime, ARM64 PGO builds, optional Rust WebUI, and JS/Lua LuCI with Chinese translations. Original authorship and license notices are retained.
 
-Development is consolidated on **`main`**. Headless and WebUI are build variants of the same source, with separate release tags; they do not require separate maintenance branches.
+The repository is named `smartdns-rs-optimized`; the executable remains `smartdns` and OpenWrt package/service names remain unchanged. Development is consolidated on **`main`**. Headless and WebUI are build variants of the same source, with separate release tags; they do not require separate maintenance branches.
 
 ## Downloads and documentation
 
-- **ARM64 PGO 0.13.1-24:** [Headless](https://github.com/milkman-wang/smartdns-rs/releases/tag/openwrt-v0.13.1-r24-pgo) / [WebUI](https://github.com/milkman-wang/smartdns-rs/releases/tag/openwrt-webui-v0.13.1-r24-pgo). These releases provide ARM64 musl IPK and binary archives, plus JS/Lua LuCI packages; they do not contain APK or other architectures.
+- **ARM64 PGO 0.13.1-24:** [Headless](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-v0.13.1-r24-pgo) / [WebUI](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-webui-v0.13.1-r24-pgo). These releases provide ARM64 musl IPK and binary archives, plus JS/Lua LuCI packages; they do not contain APK or other architectures.
 - [Release notes](docs/releases/openwrt-0.13.1-r24-pgo.md) · [Build variants](docs/BUILD_VARIANTS.md) · [OpenWrt installation](contrib/openwrt/README.md) · [LuCI support matrix](contrib/openwrt/INTERFACE_MATRIX.md).
 - [C feature compatibility](docs/C_FEATURE_COMPATIBILITY.md): native ipset/nftset, TCP SYN probing, SPKI, DDR, certificate generation and local records. Kernel features are required for sets. C fallback, independent HTTP Host and the C plugin ABI remain unsupported.
 
@@ -99,7 +99,7 @@ Platform and feature coverage are documented in the [compatibility guide](docs/C
 
 ## Installing
 
-*Nightly builds can be found [here](https://github.com/milkman-wang/smartdns-rs/actions/workflows/nightly.yml).*
+*Nightly builds can be found [here](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/nightly.yml).*
 
 - OpenWrt
 
@@ -122,7 +122,7 @@ Platform and feature coverage are documented in the [compatibility guide](docs/C
 
 - Windows / Linux
 
-  Download a matching platform asset from [this fork's releases](https://github.com/milkman-wang/smartdns-rs/releases), or build from source if none is available. The ARM64 PGO release cannot run on Windows or x86. After extracting a matching binary:
+  Download a matching platform asset from [this fork's releases](https://github.com/milkman-wang/smartdns-rs-optimized/releases), or build from source if none is available. The ARM64 PGO release cannot run on Windows or x86. After extracting a matching binary:
 
   1. Get help
 
@@ -230,8 +230,8 @@ dig @127.0.0.1 CH TXT id.server +short
 Assuming you have installed [Rust](https://www.rust-lang.org/learn/get-started), then you can open the terminal and execute these commands:
 
 ```shell
-git clone https://github.com/milkman-wang/smartdns-rs.git
-cd smartdns-rs
+git clone https://github.com/milkman-wang/smartdns-rs-optimized.git
+cd smartdns-rs-optimized
 
 # install https://github.com/casey/just
 cargo install just

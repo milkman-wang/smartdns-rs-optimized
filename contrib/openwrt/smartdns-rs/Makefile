@@ -6,11 +6,12 @@ PKG_NAME:=smartdns-rs
 PKG_VERSION:=0.13.1
 PKG_RELEASE:=1
 
-PKG_SOURCE_VERSION:=98b299ae46afc2c38be458dcce9a8ce119b00f6b
+PKG_SOURCE_VERSION:=8b329415972b76d8ab5471417254120ef8fe6e72
+PKG_SOURCE_PROJECT:=smartdns-rs-optimized
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_SOURCE_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/milkman-wang/smartdns-rs/tar.gz/$(PKG_SOURCE_VERSION)?
-PKG_HASH:=ffb9b8f51d23885c585ffb8225743fe530a0c28a3d6e351229246c2c8c6f8ec4
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)$(if $(BUILD_VARIANT),-$(BUILD_VARIANT))/$(PKG_NAME)-$(PKG_SOURCE_VERSION)
+PKG_SOURCE_URL:=https://codeload.github.com/milkman-wang/smartdns-rs-optimized/tar.gz/$(PKG_SOURCE_VERSION)?
+PKG_HASH:=a2629f5d3a3a093035485d24afda5c37556a3423bfc7c6a02b1a2fe6b34cffd7
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)$(if $(BUILD_VARIANT),-$(BUILD_VARIANT))/$(PKG_SOURCE_PROJECT)-$(PKG_SOURCE_VERSION)
 
 PKG_MAINTAINER:=SmartDNS-rs contributors
 PKG_LICENSE:=GPL-3.0-only
@@ -49,7 +50,7 @@ define Package/smartdns-rs
   TITLE:=SmartDNS-rs DNS server (headless)
   VARIANT:=headless
   DEFAULT_VARIANT:=1
-  URL:=https://github.com/milkman-wang/smartdns-rs
+  URL:=https://github.com/milkman-wang/smartdns-rs-optimized
   PROVIDES:=smartdns
   CONFLICTS:=smartdns smartdns-rs-webui
   DEPENDS:=$(RUST_ARCH_DEPENDS) +ca-bundle

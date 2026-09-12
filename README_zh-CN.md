@@ -1,7 +1,7 @@
-# SmartDNS-rs
+# SmartDNS-rs Optimized
 
-![Test](https://github.com/milkman-wang/smartdns-rs/actions/workflows/test.yml/badge.svg?branch=main)
-[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/milkman-wang/smartdns-rs?display_name=tag&include_prereleases)](https://github.com/milkman-wang/smartdns-rs/releases)
+![Test](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/test.yml/badge.svg?branch=main)
+[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/milkman-wang/smartdns-rs-optimized?display_name=tag&include_prereleases)](https://github.com/milkman-wang/smartdns-rs-optimized/releases)
 ![OS](https://img.shields.io/badge/os-Windows%20%7C%20MacOS%20%7C%20Linux-blue)
 
 [文档](docs/C_FEATURE_COMPATIBILITY.md) · [C SmartDNS 上游文档](https://pymumu.github.io/smartdns/)
@@ -12,11 +12,11 @@ SmartDNS-rs 是一个本地 DNS 服务器，可以并发查询多个上游，并
 
 本 fork 重点改进路由器 CPU 效率、冷查询、缓存性能、Rust 原生 DNS 功能和 OpenWrt 集成。截至 **2026-09-12**，主要改动包括 UDP 连接复用、减少响应分配、受缓存预算约束的 TTL/编码复用、单 worker 运行时、ARM64 PGO 构建、可选 Rust WebUI，以及带中文翻译的 JS/Lua LuCI。保留原作者署名和许可证声明。
 
-开发统一维护 **`main`**。无界面版和 WebUI 版来自同一份源码，通过构建选项区分、使用各自的 Release 标签，无需分别维护分支。
+仓库名称为 `smartdns-rs-optimized`；可执行程序仍叫 `smartdns`，OpenWrt 软件包和服务名称保持不变。开发统一维护 **`main`**。无界面版和 WebUI 版来自同一份源码，通过构建选项区分、使用各自的 Release 标签，无需分别维护分支。
 
 ## 下载与文档
 
-- **ARM64 PGO 0.13.1-24：**[无界面版](https://github.com/milkman-wang/smartdns-rs/releases/tag/openwrt-v0.13.1-r24-pgo) / [WebUI 版](https://github.com/milkman-wang/smartdns-rs/releases/tag/openwrt-webui-v0.13.1-r24-pgo)。包含 ARM64 musl IPK、二进制压缩包和 JS/Lua LuCI；不包含 APK 或其他架构。
+- **ARM64 PGO 0.13.1-24：**[无界面版](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-v0.13.1-r24-pgo) / [WebUI 版](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-webui-v0.13.1-r24-pgo)。包含 ARM64 musl IPK、二进制压缩包和 JS/Lua LuCI；不包含 APK 或其他架构。
 - [更新日志](docs/releases/openwrt-0.13.1-r24-pgo.md) · [构建与版本选择](docs/BUILD_VARIANTS.md) · [OpenWrt 安装](contrib/openwrt/README.md) · [LuCI 支持矩阵](contrib/openwrt/INTERFACE_MATRIX.md)。
 - [C 功能兼容说明](docs/C_FEATURE_COMPATIBILITY.md)：原生 ipset/nftset、TCP SYN 测速、SPKI、DDR、证书生成和本地记录。集合功能需要内核支持；C 版 fallback、独立 HTTP Host 和 C 插件 ABI 尚未实现。
 
@@ -98,7 +98,7 @@ SmartDNS-rs 是一个本地 DNS 服务器，可以并发查询多个上游，并
 
 ## 安装
 
-*每日构建的版本可以在[这](https://github.com/milkman-wang/smartdns-rs/actions/workflows/nightly.yml)找到。*
+*每日构建的版本可以在[这](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/nightly.yml)找到。*
 
 - OpenWrt
 
@@ -121,7 +121,7 @@ SmartDNS-rs 是一个本地 DNS 服务器，可以并发查询多个上游，并
 
 - Windows / Linux
 
-  从[本 fork 的 Release](https://github.com/milkman-wang/smartdns-rs/releases)选择对应平台的附件；尚无对应附件时从源码构建。ARM64 PGO 包不能在 Windows 或 x86 上运行。解压匹配的二进制后：
+  从[本 fork 的 Release](https://github.com/milkman-wang/smartdns-rs-optimized/releases)选择对应平台的附件；尚无对应附件时从源码构建。ARM64 PGO 包不能在 Windows 或 x86 上运行。解压匹配的二进制后：
 
   1. 查看帮助
 
@@ -228,8 +228,8 @@ dig @127.0.0.1 CH TXT id.server +short
 假设你已经安装了 [Rust](https://www.rust-lang.org/learn/get-started)，那么你可以打开命令行界面，执行如下命令：
 
 ```shell
-git clone https://github.com/milkman-wang/smartdns-rs.git
-cd smartdns-rs
+git clone https://github.com/milkman-wang/smartdns-rs-optimized.git
+cd smartdns-rs-optimized
 
 # 安装 https://github.com/casey/just
 cargo install just

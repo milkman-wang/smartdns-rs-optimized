@@ -122,6 +122,7 @@ jobs:
           source_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
           sed -i \
             -e "s|^PKG_SOURCE_VERSION:=.*|PKG_SOURCE_VERSION:=${SOURCE_REVISION}|" \
+            -e "s|^PKG_SOURCE_PROJECT:=.*|PKG_SOURCE_PROJECT:=${SOURCE_REPOSITORY##*/}|" \
             -e "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/\$(PKG_SOURCE_VERSION)?|" \
             -e "s|^PKG_HASH:=.*|PKG_HASH:=${source_hash}|" \
             contrib/openwrt/smartdns-rs/Makefile
@@ -193,6 +194,7 @@ jobs:
           source_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
           sed -i \
             -e "s|^PKG_SOURCE_VERSION:=.*|PKG_SOURCE_VERSION:=${SOURCE_REVISION}|" \
+            -e "s|^PKG_SOURCE_PROJECT:=.*|PKG_SOURCE_PROJECT:=${SOURCE_REPOSITORY##*/}|" \
             -e "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/\$(PKG_SOURCE_VERSION)?|" \
             -e "s|^PKG_HASH:=.*|PKG_HASH:=${source_hash}|" \
             contrib/openwrt/smartdns-rs/Makefile

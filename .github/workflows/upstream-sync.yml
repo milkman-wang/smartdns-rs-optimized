@@ -44,32 +44,38 @@ jobs:
           upstream_sha="$(git rev-parse upstream/main)"
           version="$(git show upstream/main:Cargo.toml | sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p')"
           test -n "$version"
+          git commit -m "chore(upstream): sync mokeyish/smartdns-rs@${upstream_sha:0:12}"
+          git push origin HEAD:main
+          source_sha="$(git rev-parse HEAD)"
           curl --fail --location --retry 3 \
             --output /tmp/smartdns-upstream.tar.gz \
-            "https://codeload.github.com/mokeyish/smartdns-rs/tar.gz/${upstream_sha}"
+            "https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/${source_sha}"
           source_hash="$(sha256sum /tmp/smartdns-upstream.tar.gz | cut -d' ' -f1)"
 
-          python3 - "$upstream_sha" "$source_hash" "$version" <<'PY'
+          python3 - "$source_sha" "$source_hash" "$version" "$GITHUB_REPOSITORY" <<'PY'
           import re
           import sys
           from pathlib import Path
 
-          source_sha, source_hash, version = sys.argv[1:]
+          source_sha, source_hash, version, repository = sys.argv[1:]
           package = Path("contrib/openwrt/smartdns-rs/Makefile")
           text = package.read_text(encoding="utf-8")
           text = re.sub(r"^PKG_VERSION:=.*$", f"PKG_VERSION:={version}", text, flags=re.MULTILINE)
           text = re.sub(r"^PKG_SOURCE_VERSION:=.*$", f"PKG_SOURCE_VERSION:={source_sha}", text, flags=re.MULTILINE)
+          text = re.sub(r"^PKG_SOURCE_PROJECT:=.*$", f"PKG_SOURCE_PROJECT:={repository.split('/')[-1]}", text, flags=re.MULTILINE)
+          text = re.sub(r"^PKG_SOURCE_URL:=.*$", f"PKG_SOURCE_URL:=https://codeload.github.com/{repository}/tar.gz/$(PKG_SOURCE_VERSION)?", text, flags=re.MULTILINE)
           text = re.sub(r"^PKG_HASH:=.*$", f"PKG_HASH:={source_hash}", text, flags=re.MULTILINE)
           package.write_text(text, encoding="utf-8")
 
-          luci = Path("contrib/openwrt/luci-app-smartdns-rs/Makefile")
-          text = luci.read_text(encoding="utf-8")
-          text = re.sub(r"^PKG_VERSION:=.*$", f"PKG_VERSION:={version}", text, flags=re.MULTILINE)
-          luci.write_text(text, encoding="utf-8")
+          for name in ("luci-app-smartdns-rs", "luci-app-smartdns-rs-compat"):
+              luci = Path("contrib/openwrt") / name / "Makefile"
+              text = luci.read_text(encoding="utf-8")
+              text = re.sub(r"^PKG_VERSION:=.*$", f"PKG_VERSION:={version}", text, flags=re.MULTILINE)
+              luci.write_text(text, encoding="utf-8")
           PY
 
           git add --all
-          git commit -m "chore(upstream): sync mokeyish/smartdns-rs@${upstream_sha:0:12}"
+          git commit -m "chore(openwrt): pin merged fork source ${source_sha:0:12}"
           git push origin HEAD:main
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
@@ -78,4 +84,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh workflow run openwrt.yml --ref main -f publish=true
+        run: |
+          gh workflow run openwrt.yml --ref main -f publish=true
+          gh workflow run openwrt-webui.yml --ref main -f publish=true
