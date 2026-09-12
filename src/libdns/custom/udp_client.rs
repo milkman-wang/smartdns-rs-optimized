@@ -229,6 +229,11 @@ impl UdpClient {
                     return Ok(socket);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+                // Windows also rejects randomly chosen reserved/exclusive ports
+                // with WSAEACCES. Retry another port, as for an occupied one.
+                Err(error) if cfg!(windows) && port != 0 && error.raw_os_error() == Some(10013) => {
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
         }

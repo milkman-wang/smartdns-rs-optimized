@@ -1,9 +1,10 @@
+use portable_atomic::AtomicU64;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };

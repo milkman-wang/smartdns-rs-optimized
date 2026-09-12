@@ -10,7 +10,7 @@ PKG_MAINTAINER:=SmartDNS-rs contributors
 
 LUCI_TITLE:=LuCI support for SmartDNS-rs
 LUCI_DESCRIPTION:=Configure SmartDNS-rs with UCI and LuCI
-LUCI_DEPENDS:=+luci-base +!PACKAGE_smartdns-rs-webui:smartdns-rs +PACKAGE_smartdns-rs-webui:smartdns-rs-webui
+LUCI_DEPENDS:=+luci-base +smartdns-rs
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk

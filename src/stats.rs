@@ -3,10 +3,11 @@ use crate::{
     dns::{DnsContext, DnsError, DnsRequest, DnsResponse, LookupFrom, RecordType},
     libdns::proto::op::ResponseCode,
 };
+use portable_atomic::AtomicU64;
 use std::{
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };

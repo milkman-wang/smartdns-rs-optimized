@@ -3400,6 +3400,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pkcs8",
+ "portable-atomic",
  "quinn",
  "rand 0.9.4",
  "rangemap",

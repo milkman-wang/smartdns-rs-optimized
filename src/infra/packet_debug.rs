@@ -4,12 +4,13 @@ use crate::libdns::proto::{
     op::Message,
     xfer::{DnsClientStream, SerialMessage},
 };
+use portable_atomic::AtomicU64;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 

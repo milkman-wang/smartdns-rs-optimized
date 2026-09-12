@@ -10,7 +10,7 @@ PKG_MAINTAINER:=SmartDNS-rs contributors
 
 LUCI_TITLE:=Lua LuCI support for SmartDNS-rs
 LUCI_DESCRIPTION:=Configure SmartDNS-rs using Lua CBI on legacy and modern LuCI
-LUCI_DEPENDS:=+luci-base +!PACKAGE_smartdns-rs-webui:smartdns-rs +PACKAGE_smartdns-rs-webui:smartdns-rs-webui
+LUCI_DEPENDS:=+luci-base +smartdns-rs
 # CBI is in luci-base on old firmware. On modern firmware install luci-compat.
 # Ship source under root/ so luci.mk does not add luci-lua-runtime, which
 # does not exist on legacy firmware, to the architecture-independent package.
