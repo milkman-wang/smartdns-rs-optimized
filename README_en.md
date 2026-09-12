@@ -4,7 +4,7 @@ English | [中文](README.md)
 
 A router-focused local DNS server with ad blocking, domain routing and encrypted DNS. Based on [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs), this fork improves query performance, resource usage and OpenWrt integration.
 
-[Downloads](https://github.com/milkman-wang/smartdns-rs-optimized/releases) · [OpenWrt installation](contrib/openwrt/README.md) · [Release notes](docs/releases/openwrt-0.13.1-r24-pgo.md)
+[Downloads](https://github.com/milkman-wang/smartdns-rs-optimized/releases) · [OpenWrt installation](contrib/openwrt/README.md) · [Changes](https://github.com/milkman-wang/smartdns-rs-optimized/commits/main/)
 
 ## Features
 
@@ -16,17 +16,27 @@ A router-focused local DNS server with ad blocking, domain routing and encrypted
 
 ## Performance
 
-### Xiaomi BE10000 router
+Tested on 2026-09-13 using the latest main build, including the large-rule-list memory fix. Each table limits the DNS service to **two CPU cores**, with the same local upstream and workload for all three implementations. Values are medians of three runs; **higher means more queries processed per second**.
 
-All three implementations use the same local upstream and workload, limited to two CPU cores. Values are medians of three runs; **higher means more queries processed per second**.
+### Xiaomi BE10000 router
 
 | Version | Uncached queries / second | Cached queries / second |
 |---|---:|---:|
-| C SmartDNS Release48.4 | 41,232 | 55,371 |
-| Upstream Rust v0.13.1 | 10,508 | 9,228 |
-| This project 0.13.1-24 | 53,890 | 116,835 |
+| C SmartDNS Release48.4 | 41,939 | 55,138 |
+| Upstream Rust v0.13.1 | 10,356 | 8,807 |
+| This project (2026-09-13 main) | 49,640 | 115,843 |
 
-Tested on 2026-09-12. This project processes more queries per second in this workload; C SmartDNS has lower tail latency at low load. These results are not public DNS latency or page load times. Single-core results, latency, memory, exact versions and reproduction steps are in the [detailed report](docs/PERFORMANCE.md).
+### Ryzen 7 9800X3D · WSL2
+
+Ubuntu 24.04 under WSL2 on the same PC, with two virtual CPU cores assigned to each DNS service.
+
+| Version | Uncached queries / second | Cached queries / second |
+|---|---:|---:|
+| C SmartDNS Release48.4 | 52,231 | 113,606 |
+| Upstream Rust v0.13.1 | 24,338 | 28,403 |
+| This project (2026-09-13 main) | 98,923 | 400,844 |
+
+These measurements describe local DNS throughput. Public upstream latency, router features and virtualization affect real-world results. See the [detailed report](docs/PERFORMANCE.md) for single-core results, latency, memory, exact binaries and reproduction steps.
 
 ## Choose a version
 
@@ -37,7 +47,7 @@ Tested on 2026-09-12. This project processes more queries per second in this wor
 
 Both provide the same DNS features. LuCI is a separate OpenWrt interface and works with either version.
 
-The current ARM64 router releases are available as [headless](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-v0.13.1-r24-pgo) and [WebUI](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-webui-v0.13.1-r24-pgo). Choose assets for your architecture and package manager. These releases provide IPK, not APK.
+Choose a published package from [Releases](https://github.com/milkman-wang/smartdns-rs-optimized/releases), or obtain a recent main build from [GitHub Actions](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/build.yml). Match the architecture and package manager; IPK and APK are different formats. The detailed report identifies the exact artifacts tested above.
 
 ## Getting started
 
@@ -57,6 +67,6 @@ Address sets require kernel support. C fallback, independent HTTP Host and the C
 
 ## Credits and license
 
-Thanks to [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs), [C SmartDNS](https://github.com/pymumu/smartdns) and [Hickory DNS](https://github.com/hickory-dns/hickory-dns). This fork is maintained by milkman-wang; recent modifications are documented in the 2026-09-12 release notes.
+Thanks to [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs), [C SmartDNS](https://github.com/pymumu/smartdns) and [Hickory DNS](https://github.com/hickory-dns/hickory-dns). This fork is maintained by milkman-wang.
 
 Licensed under [GPL-3.0](LICENSE), retaining upstream attribution. Code derived from Hickory DNS retains its Apache-2.0 / MIT notices.

@@ -61,7 +61,7 @@ EOF
             iptables -t mangle -Z OUTPUT
             domains=256; seconds=5; window=32; rate=0
             case "$scenario" in
-                cold) domains=1000000 ;;
+                cold) domains=${COLD_DOMAINS:-1000000} ;;
                 cache) : ;; # v0.13.1 refreshes on hits; keep the upstream available for every implementation.
                 latency) seconds=10; window=4; rate=100 ;;
                 loaded-latency) seconds=10; window=4; rate=1000 ;;

@@ -4,7 +4,7 @@
 
 一个面向路由器的本地 DNS 服务，支持广告过滤、域名分流和加密 DNS。本项目基于 [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs)，重点改进查询速度、资源占用和 OpenWrt 使用体验。
 
-[下载](https://github.com/milkman-wang/smartdns-rs-optimized/releases) · [安装教程](contrib/openwrt/README.md) · [更新日志](docs/releases/openwrt-0.13.1-r24-pgo.md)
+[下载](https://github.com/milkman-wang/smartdns-rs-optimized/releases) · [安装教程](contrib/openwrt/README.md) · [更新记录](https://github.com/milkman-wang/smartdns-rs-optimized/commits/main/)
 
 ## 能做什么
 
@@ -16,19 +16,27 @@
 
 ## 性能对比
 
-### 小米 BE10000 路由器
+测试日期：2026-09-13，使用包含大量规则内存修复的最新主分支。每张表中三者均限制使用**两个 CPU 核心**，使用相同的本地上游和查询负载。以下为三轮测试的中位数，**数值越大，每秒能处理的查询越多**。
 
-三者均限制使用两个 CPU 核心，使用相同的本地上游和查询负载。下面是三轮测试的中位数，**数值越大，每秒能处理的查询越多**。
+### 小米 BE10000 路由器
 
 | 版本 | 未缓存查询：次/秒 | 已缓存查询：次/秒 |
 |---|---:|---:|
-| C SmartDNS Release48.4 | 41,232 | 55,371 |
-| 原作者 Rust v0.13.1 | 10,508 | 9,228 |
-| 本项目 0.13.1-24 | 53,890 | 116,835 |
+| C SmartDNS Release48.4 | 41,939 | 55,138 |
+| 原作者 Rust v0.13.1 | 10,356 | 8,807 |
+| 本项目（2026-09-13 主分支） | 49,640 | 115,843 |
 
-测试日期：2026-09-12。本项目在这组测试中每秒处理量更高，C 版在低负载下的尾部延迟更低。这些结果不等于访问公网 DNS 或打开网页的速度。
+### Ryzen 7 9800X3D · WSL2
 
-单核结果、延迟、内存、具体版本及复现方法见 [详细测试报告](docs/PERFORMANCE.md)。
+同一台电脑的 WSL2 / Ubuntu 24.04 环境，每个 DNS 服务使用两个虚拟 CPU 核心。
+
+| 版本 | 未缓存查询：次/秒 | 已缓存查询：次/秒 |
+|---|---:|---:|
+| C SmartDNS Release48.4 | 52,231 | 113,606 |
+| 原作者 Rust v0.13.1 | 24,338 | 28,403 |
+| 本项目（2026-09-13 主分支） | 98,923 | 400,844 |
+
+这些数据反映本地 DNS 的处理能力。实际体验还受公网延迟、路由器功能配置和虚拟化环境影响。单核结果、延迟、内存、具体版本及复现方法见 [详细测试报告](docs/PERFORMANCE.md)。
 
 ## 下载哪个版本
 
@@ -39,7 +47,7 @@
 
 两种版本的 DNS 功能相同。LuCI 是独立的 OpenWrt 管理页面，无界面版也能使用。
 
-目前提供 [ARM64 路由器无界面版](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-v0.13.1-r24-pgo) 和 [ARM64 路由器 WebUI 版](https://github.com/milkman-wang/smartdns-rs-optimized/releases/tag/openwrt-webui-v0.13.1-r24-pgo)。请按设备架构和包管理器选择附件；这两个版本提供 IPK，不能当作 APK 安装。
+已发布的安装包见 [下载页](https://github.com/milkman-wang/smartdns-rs-optimized/releases)，近期主分支构建见 [GitHub Actions](https://github.com/milkman-wang/smartdns-rs-optimized/actions/workflows/build.yml)。请按设备架构和包管理器选择附件，IPK 与 APK 不能混用。上表测试程序的具体来源见详细报告。
 
 ## 开始使用
 
@@ -59,6 +67,6 @@
 
 ## 来源与许可证
 
-感谢 [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs)、[C SmartDNS](https://github.com/pymumu/smartdns) 和 [Hickory DNS](https://github.com/hickory-dns/hickory-dns)。本 fork 由 milkman-wang 维护，近期修改见 2026-09-12 更新日志。
+感谢 [mokeyish/smartdns-rs](https://github.com/mokeyish/smartdns-rs)、[C SmartDNS](https://github.com/pymumu/smartdns) 和 [Hickory DNS](https://github.com/hickory-dns/hickory-dns)。本 fork 由 milkman-wang 维护。
 
 项目遵循 [GPL-3.0](LICENSE)，保留原作者署名；来自 Hickory DNS 的代码保留其 Apache-2.0 / MIT 许可声明。

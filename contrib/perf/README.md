@@ -1,31 +1,29 @@
 # SmartDNS Performance Suite
 
-This directory contains a scenario-based performance suite that targets specific runtime paths.
+The [current performance report](../../docs/PERFORMANCE.md) compares C SmartDNS,
+upstream Rust and this fork on the Xiaomi BE10000 and Ryzen 7 9800X3D / WSL2,
+using main commit 657637e on 2026-09-13.
 
-The [performance goal report](performance-goal-20260912.md) compares the latest
-headless and WebUI builds against C Release48.4 and their previous optimized
-builds, with repeated throughput, CPU cost, latency, and router feature checks.
+## Recorded measurements
 
-The [2026-09-12 optimization report](optimization-20260912.md) compares the
-finished optimization with both pre-optimization variants, the previous Rust
-version, and C, including CPU cost and live WebUI validation.
+| Report | Scope |
+|---|---|
+| [Latest three-way comparison](../../docs/PERFORMANCE.md) | One/two-core throughput, latency and memory on ARM64 and x86_64 |
+| [Passwall OOM regression](oom-regression-20260912.md) | Full rule lists, startup memory and IPSet reply timing |
+| [ARM PGO and LAN](wire-pgo-20260912.md) | Compiler training, CPU counters and physical LAN measurements |
+| [Single-core efficiency](router-efficiency-20260912.md) | Implementation choices and OxiDNS study |
+| [Earlier feature validation](performance-goal-20260912.md) | Headless/WebUI behavior and router integration |
+| [Earlier optimization measurements](optimization-20260912.md) | Historical development comparisons |
+| [Earlier C/Rust measurements](c-rust-20260912.md) | Historical deployed builds; not the current upstream baseline |
 
-The [2026-09-12 C and Rust comparison](c-rust-20260912.md) measures C Release48.4,
-the previous deployed Rust version, and the current headless/WebUI variants on
-the same router. It includes raw results and a reproducible isolated runner.
+Historical reports retain the exact versions tested. Use the current report for
+homepage comparisons, rather than treating an old report's “latest” build as
+the present main branch.
 
-## Scenarios and covered functionality
+## CI scenarios
 
-The [encoded response, PGO, and physical LAN report](wire-pgo-20260912.md)
-compares the next optimization with the previous final build, including CPU
-target screening, ARM PMU counters, load-generator capacity, and process affinity.
-Its final packages use PGO; ordinary release builds receive the source changes
-without automatically applying the trained profile.
-
-The [single-core efficiency and OxiDNS implementation study](router-efficiency-20260912.md)
-records the next round of measured changes, including 96 final trials, bounded
-TTL response reuse, cold-query memory samples, and latency tradeoffs. Its
-[isolated runner](run_router_efficiency.sh) verifies upstream query counts.
+The Python suite below exercises individual runtime paths. It is separate from
+the isolated three-way comparison in run_release_comparison.sh.
 
 | Scenario | Covered functionality |
 |---|---|
