@@ -156,9 +156,9 @@ The following is the simplest example configuration
 
 ```conf
 # Listen on local port 53
-bind 127.0.0.1:53  
+bind 127.0.0.1:53
 
-# Configure bootstrap-dns, if not configured, call the system_conf, 
+# Configure bootstrap-dns, if not configured, call the system_conf,
 # it is recommended to configure, so that it will be encrypted.
 server https://1.1.1.1/dns-query  -bootstrap-dns -exclude-default-group
 server https://8.8.8.8/dns-query  -bootstrap-dns -exclude-default-group
