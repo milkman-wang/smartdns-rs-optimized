@@ -1,4 +1,6 @@
+mod ddr;
 mod identity;
+pub use ddr::lookup as ddr_lookup;
 mod local_ptr;
 mod rule;
 

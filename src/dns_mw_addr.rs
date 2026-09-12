@@ -44,7 +44,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
 
         match res {
             Ok(mut lookup) => Ok({
-                let records = lookup.answers_mut();
+                let records = lookup.answers();
 
                 if query_type.is_ip_addr()
                     && let Some(mut max_reply_ip_num) = ctx.cfg().max_reply_ip_num()
@@ -63,7 +63,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
 
                     match truncate {
                         Some(truncate) if records.len() > truncate => {
-                            records.truncate(truncate);
+                            lookup.answers_mut().truncate(truncate);
                         }
                         _ => (),
                     }
@@ -85,7 +85,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                 let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
 
                 if rr_ttl_min.is_some() || rr_ttl_max.is_some() || rr_ttl_reply_max.is_some() {
-                    for record in records.iter_mut() {
+                    for record in lookup.answers_mut().iter_mut() {
                         if let Some(rr_ttl_min) = rr_ttl_min {
                             record.set_min_ttl(rr_ttl_min);
                         }

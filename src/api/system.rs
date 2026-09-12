@@ -19,6 +19,7 @@ async fn status(State(s): State<Arc<ServeState>>) -> Json<SystemStatus> {
     Json(SystemStatus {
         server_name: cfg.server_name(),
         version: crate::BUILD_VERSION,
+        flavor: crate::BUILD_FLAVOR,
         build_date: crate::BUILD_DATE.with_timezone(&chrono::Local),
         uptime: format!("{:?}", app.uptime()),
         config_loaded_at: format!("{:?}", app.loaded_at().await),
@@ -31,6 +32,7 @@ struct SystemStatus {
     #[schema(value_type = String)]
     server_name: Name,
     version: &'static str,
+    flavor: &'static str,
     #[schema(value_type = String)]
     build_date: chrono::DateTime<chrono::Local>,
     uptime: String,

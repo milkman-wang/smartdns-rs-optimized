@@ -13,6 +13,14 @@ use tracing_subscriber::{
 };
 
 static INIT_CONSOLE_LEVEL: OnceLock<Level> = OnceLock::new();
+type LevelSetter = Box<dyn Fn(Option<Level>) + Send + Sync>;
+static LEVEL_SETTER: std::sync::Mutex<Option<LevelSetter>> = std::sync::Mutex::new(None);
+
+pub fn set_runtime_level(level: Option<Level>) {
+    if let Some(setter) = LEVEL_SETTER.lock().unwrap().as_ref() {
+        setter(level);
+    }
+}
 
 thread_local! {
     pub static LOG_GUARD: RefCell<Option<DefaultGuard>> = const { RefCell::new(None) };
@@ -32,6 +40,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
     num: u64,
     mode: Option<u32>,
     to_console: bool,
+    to_syslog: bool,
 ) -> Dispatch {
     let cli_level = INIT_CONSOLE_LEVEL.get().cloned();
     let level = match (level, cli_level) {
@@ -67,7 +76,7 @@ pub fn make_dispatch<P: AsRef<Path>>(
         // log hello
         {
             let writer = file.with_max_level(level);
-            let dispatch = internal_make_dispatch(level, filter, writer, true);
+            let dispatch = internal_make_dispatch(level, filter, writer, true, to_syslog);
 
             let _guard = set_default(&dispatch);
             crate::hello_starting();
@@ -82,12 +91,21 @@ pub fn make_dispatch<P: AsRef<Path>>(
                 filter,
                 file_writer.and(console_writer),
                 true,
+                to_syslog,
             )
         } else {
-            internal_make_dispatch(level.max(console_level), filter, file_writer, true)
+            internal_make_dispatch(
+                level.max(console_level),
+                filter,
+                file_writer,
+                true,
+                to_syslog,
+            )
         }
     } else if to_console {
-        internal_make_dispatch(console_level, filter, console_writer, true)
+        internal_make_dispatch(console_level, filter, console_writer, true, to_syslog)
+    } else if to_syslog {
+        internal_make_dispatch(level, filter, io::sink, true, true)
     } else {
         Dispatch::none()
     }
@@ -101,6 +119,7 @@ pub fn console(console_level: Level) -> DefaultGuard {
         None,
         console_writer,
         false,
+        false,
     ))
 }
 
@@ -110,14 +129,34 @@ fn internal_make_dispatch<W: for<'writer> MakeWriter<'writer> + 'static + Send +
     filter: Option<&str>,
     writer: W,
     diagnostic: bool,
+    to_syslog: bool,
 ) -> Dispatch {
     let layer = tracing_subscriber::fmt::layer()
         .event_format(TdnsFormatter)
         .with_writer(writer);
 
+    let syslog = to_syslog.then(|| {
+        tracing_subscriber::fmt::layer()
+            .event_format(TdnsFormatter)
+            .with_ansi(false)
+            .with_writer(crate::infra::syslog::SyslogWriter)
+    });
+    let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(make_filter(level, filter));
     let subscriber = tracing_subscriber::registry()
+        .with(crate::plugins::LogLayer)
         .with(layer)
-        .with(make_filter(level, filter));
+        .with(syslog)
+        .with(filter_layer);
+
+    if diagnostic {
+        let filter = filter.map(str::to_string);
+        *LEVEL_SETTER.lock().unwrap() = Some(Box::new(move |level| {
+            let next = level
+                .map(|level| make_filter(level, filter.as_deref()))
+                .unwrap_or_else(|| EnvFilter::new("off"));
+            let _ = handle.reload(next);
+        }));
+    }
 
     if diagnostic {
         #[cfg(feature = "future-diagnostic")]

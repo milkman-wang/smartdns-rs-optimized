@@ -4,6 +4,10 @@ name: Build
 on:
   workflow_call:
     inputs:
+      variant:
+        type: string
+        default: headless
+        description: headless or webui; each publishes its own Release
       version:
         type: string
         required: false
@@ -19,6 +23,10 @@ on:
 
   workflow_dispatch:
     inputs:
+      variant:
+        type: choice
+        default: headless
+        options: [headless, webui]
       features:
         type: string
         required: false
@@ -26,9 +34,12 @@ on:
         description: Space or comma separated list of features to activate
 
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: build ${{ matrix.target }} ${{ inputs.version }}
+    name: build ${{ inputs.variant }} ${{ matrix.target }} ${{ inputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +105,9 @@ jobs:
 
     runs-on: ${{matrix.os}}
     env:
-      DIST_DIR: smartdns-${{ matrix.target }}
+      BUILD_FEATURES: ${{ format('{0}{1}', inputs.features, inputs.variant == 'webui' && ',webui' || '') }}
+      SMARTDNS_RELEASE_REPOSITORY: ${{ github.repository }}
+      BUILD_VARIANT: ${{ inputs.variant }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -106,13 +119,21 @@ jobs:
         with:
           rust_target: ${{ matrix.target }}
 
+      - name: Validate variant and capture source revision
+        id: source
+        shell: bash
+        run: |
+          case "$BUILD_VARIANT" in headless|webui) ;; *) exit 1 ;; esac
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build
-        run: just build --release --no-default-features --features ${{ inputs.features }} --target=${{ matrix.target }}
+        shell: bash
+        run: just build --release --no-default-features --features "$BUILD_FEATURES" --target=${{ matrix.target }}
         env:
           USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
 
       - name: Package
-        run: just target=${{ matrix.target }} pack
+        run: just flavor=${{ inputs.variant }} target=${{ matrix.target }} pack
         shell: bash
 
       - name: Compute release label
@@ -125,7 +146,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: smartdns-${{ matrix.target }}-${{ steps.release_label.outputs.value }}
+          name: smartdns-${{ inputs.variant }}-${{ matrix.target }}-${{ steps.release_label.outputs.value }}
           retention-days: 30
           path: |
             dist/*.zip
@@ -140,7 +161,10 @@ jobs:
         with:
           draft: false
           prerelease: ${{ inputs.prerelease }}
-          tag_name: ${{ inputs.version }}
+          tag_name: ${{ inputs.variant == 'webui' && format('webui-{0}', inputs.version) || inputs.version }}
+          name: SmartDNS-rs ${{ inputs.variant }} ${{ inputs.version }}
+          make_latest: ${{ inputs.variant == 'headless' && !inputs.prerelease }}
+          target_commitish: ${{ steps.source.outputs.sha }}
           files: |
             dist/*.zip
             dist/*.tar.gz

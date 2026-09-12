@@ -138,7 +138,9 @@ fn parse(input: &str) -> IResult<&str, BindAddrConfig> {
     let (input, options) = opt(preceded(space1, options::parse)).parse(input)?;
 
     let (options, opts) = if let Some(options) = options {
-        parse_server_opts(&options)
+        parse_server_opts(&options).map_err(|_| {
+            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?
     } else {
         (Vec::with_capacity(0), Default::default())
     };
@@ -221,7 +223,7 @@ fn parse(input: &str) -> IResult<&str, BindAddrConfig> {
     Ok((input, listener))
 }
 
-pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts) {
+pub fn parse_server_opts<'b>(options: &Options<'b>) -> Result<(Options<'b>, ServerOpts), ()> {
     let mut opts = ServerOpts::default();
 
     let mut rest_options = vec![];
@@ -229,6 +231,23 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
     for (k, v) in options {
         match k.to_lowercase().as_str() {
             "group" => opts.group = v.map(|s| s.to_string()),
+            "ddr" => opts.ddr = Some(true),
+            "ipset" => {
+                opts.ipset = Some(
+                    all_consuming(NomParser::parse)
+                        .parse(v.ok_or(())?)
+                        .map_err(|_| ())?
+                        .1,
+                )
+            }
+            "nftset" => {
+                opts.nftset = Some(
+                    all_consuming(NomParser::parse)
+                        .parse(v.ok_or(())?)
+                        .map_err(|_| ())?
+                        .1,
+                )
+            }
             "no-rule-addr" => opts.no_rule_addr = Some(true),
             "no-rule-nameserver" => opts.no_rule_nameserver = Some(true),
             "no-rule-ipset" => opts.no_rule_ipset = Some(true),
@@ -242,7 +261,7 @@ pub fn parse_server_opts<'b>(options: &Options<'b>) -> (Options<'b>, ServerOpts)
             _ => rest_options.push((*k, *v)),
         }
     }
-    (rest_options, opts)
+    Ok((rest_options, opts))
 }
 
 fn parse_ssl_config<'b>(options: &Options<'b>) -> (Options<'b>, SslConfig) {
@@ -257,6 +276,7 @@ fn parse_ssl_config<'b>(options: &Options<'b>) -> (Options<'b>, SslConfig) {
                 config.certificate_key = v.map(Path::new).map(|p| p.to_path_buf())
             }
             "ssl-certificate" => config.certificate = v.map(Path::new).map(|p| p.to_path_buf()),
+            "ssl-certificate-key-pass" => config.certificate_key_pass = v.map(str::to_string),
             _ => rest_options.push((*k, *v)),
         }
     }

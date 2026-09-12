@@ -16,6 +16,8 @@ SmartDNS-rs 🐋 一个是受 [C 语言版 SmartDNS](https://github.com/pymumu/s
 
 ## 特性
 
+新增配置、C 插件接口和平台要求见 [C SmartDNS 功能兼容说明](docs/C_FEATURE_COMPATIBILITY.md)。
+
 - **多 DNS 上游服务器**
 
   支持配置多个上游 DNS 服务器，并同时进行查询，即使其中有 DNS 服务器异常，也不会影响查询。

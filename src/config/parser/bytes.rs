@@ -3,7 +3,7 @@ use super::*;
 impl NomParser for Byte {
     fn parse(input: &str) -> IResult<&str, Self> {
         let num = recognize(pair(digit1, opt(pair(char('.'), digit1))));
-        let unit = alpha1;
+        let unit = opt(alpha1);
         map_res(recognize((num, space0, unit)), |s| Byte::parse_str(s, true)).parse(input)
     }
 }

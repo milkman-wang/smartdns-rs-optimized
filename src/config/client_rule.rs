@@ -15,6 +15,7 @@ pub struct ClientRule {
 
     /// The rule group name
     pub group: String,
+    pub options: super::ServerOpts,
 }
 
 impl ClientRule {
@@ -34,7 +35,7 @@ impl ClientRule {
 
     pub fn match_mac(&self, mac: &str) -> bool {
         match &self.client {
-            Client::MacAddr(mac_addr) => mac_addr == mac,
+            Client::MacAddr(mac_addr) => mac_addr.eq_ignore_ascii_case(mac),
             Client::IpAddr(_) => false,
         }
     }
@@ -49,6 +50,7 @@ mod tests {
         let rule = ClientRule {
             client: Client::IpAddr("192.168.1.0/24".parse().unwrap()),
             group: "test".to_string(),
+            options: Default::default(),
         };
 
         assert!(rule.match_ip(&"192.168.1.0".parse().unwrap()));

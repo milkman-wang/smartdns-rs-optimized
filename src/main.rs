@@ -6,6 +6,10 @@ use config::NameServerInfo;
 use dns_url::DnsUrl;
 use std::str::FromStr;
 
+#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod api;
 mod app;
 mod cli;
@@ -25,18 +29,18 @@ mod dns_mw_dns64;
 mod dns_mw_dnsmasq;
 mod dns_mw_dualstack;
 mod dns_mw_hosts;
-#[cfg(all(feature = "nft", target_os = "linux"))]
 mod dns_mw_nftset;
 mod dns_mw_ns;
+mod dns_mw_odhcpd;
 mod dns_mw_zone;
 mod dns_rule;
 mod dns_url;
 mod dnsmasq;
 mod error;
-mod ffi;
 mod infra;
 mod libdns;
 mod log;
+mod plugins;
 mod preset_ns;
 mod proxy;
 #[cfg(feature = "resolve-cli")]
@@ -45,10 +49,19 @@ mod rustls;
 mod server;
 #[cfg(feature = "service")]
 mod service;
+mod stats;
 mod third_ext;
 #[cfg(feature = "self-update")]
 mod updater;
+#[cfg(feature = "webui")]
+mod webui;
 mod zone;
+
+pub const BUILD_FLAVOR: &str = if cfg!(feature = "webui") {
+    "webui"
+} else {
+    "headless"
+};
 
 use error::Error;
 use infra::middleware;
@@ -276,20 +289,34 @@ mod signal {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static TERMINATING: AtomicBool = AtomicBool::new(false);
+    static STOP: std::sync::LazyLock<std::sync::Mutex<tokio_util::sync::CancellationToken>> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Mutex::new(tokio_util::sync::CancellationToken::new())
+        });
+
+    pub fn request_stop() {
+        STOP.lock().unwrap().cancel();
+    }
+    pub fn reset() {
+        *STOP.lock().unwrap() = tokio_util::sync::CancellationToken::new();
+        TERMINATING.store(false, Ordering::Relaxed);
+    }
 
     pub async fn terminate() -> std::io::Result<()> {
         use tokio::signal::ctrl_c;
+        let stop = STOP.lock().unwrap().clone();
 
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
             match signal(SignalKind::terminate()) {
                 Ok(mut terminate) => tokio::select! {
+                    _ = stop.cancelled() => SignalKind::terminate(),
                     _ = terminate.recv() => SignalKind::terminate(),
                     _ = ctrl_c() => SignalKind::interrupt()
                 },
                 _ => {
-                    ctrl_c().await?;
+                    tokio::select! { result = ctrl_c() => { result?; }, _ = stop.cancelled() => {} }
                     SignalKind::interrupt()
                 }
             };
@@ -297,7 +324,7 @@ mod signal {
 
         #[cfg(not(unix))]
         {
-            ctrl_c().await?;
+            tokio::select! { result = ctrl_c() => { result?; }, _ = stop.cancelled() => {} }
         }
 
         if !TERMINATING.load(Ordering::Relaxed) {

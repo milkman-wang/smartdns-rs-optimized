@@ -281,7 +281,7 @@ load_server()
 {
 	local section="$1"
 	local enabled type ip port directive address args is_uri
-	local tls_host_verify no_check_certificate host_name server_group
+	local tls_host_verify no_check_certificate host_name server_group spki_pin
 	local exclude_default_group blacklist_ip check_edns set_mark use_proxy addition_arg
 	args=""
 
@@ -314,6 +314,7 @@ load_server()
 	fi
 
 	args=""
+	config_get spki_pin "$section" spki_pin
 	config_get tls_host_verify "$section" tls_host_verify
 	config_get_bool no_check_certificate "$section" no_check_certificate 0
 	config_get host_name "$section" host_name
@@ -325,6 +326,7 @@ load_server()
 	config_get_bool use_proxy "$section" use_proxy 0
 	config_get addition_arg "$section" addition_arg
 
+	[ -n "$spki_pin" ] && args="$args -spki-pin $spki_pin"
 	[ -n "$tls_host_verify" ] && args="$args -tls-host-verify $tls_host_verify"
 	[ "$no_check_certificate" = "1" ] && args="$args -no-check-certificate"
 	[ -n "$host_name" ] && args="$args -host-name $host_name"
@@ -378,6 +380,12 @@ load_second_server()
 		config_get_bool value "$section" "seconddns_$option" 0
 		[ "$value" = "1" ] && args="$args -$(printf '%s' "$option" | tr '_' '-')"
 	done
+	config_get value "$section" seconddns_ipset_name
+	[ -n "$value" ] && args="$args -ipset $value"
+	config_get value "$section" seconddns_nftset_name
+	[ -n "$value" ] && args="$args -nftset $value"
+	config_get_bool value "$section" seconddns_no_serve_expired 0
+	[ "$value" = "1" ] && args="$args -no-serve-expired"
 	config_get value "$section" seconddns_server_flags
 	[ -n "$value" ] && args="$args $value"
 	config_get_bool value "$section" bind_device 0
@@ -414,6 +422,10 @@ load_client_rule()
 	[ "$value" = "1" ] && args="$args -address #6"
 	config_get value "$section" nftset_name
 	[ -n "$value" ] && args="$args -nftset $value"
+	config_get value "$section" ipset_name
+	[ -n "$value" ] && args="$args -ipset $value"
+	config_get_bool value "$section" no_serve_expired 0
+	[ "$value" = "1" ] && args="$args -no-serve-expired"
 	[ -n "$args" ] && conf_append domain-rules "/./$args"
 
 	config_get file "$section" block_domain_set_file
@@ -441,6 +453,10 @@ load_domain_rule()
 	[ "$value" = "1" ] && args="$args -address #6"
 	config_get value "$section" nftset_name
 	[ -n "$value" ] && args="$args -nftset $value"
+	config_get value "$section" ipset_name
+	[ -n "$value" ] && args="$args -ipset $value"
+	config_get_bool value "$section" no_serve_expired 0
+	[ "$value" = "1" ] && args="$args -no-serve-expired"
 	config_get value "$section" addition_flag
 	[ -n "$value" ] && args="$args $value"
 
@@ -485,6 +501,10 @@ load_domain_rule_list()
 	[ "$value" = "1" ] && args="$args -address #6"
 	config_get value "$section" nftset_name
 	[ -n "$value" ] && args="$args -nftset $value"
+	config_get value "$section" ipset_name
+	[ -n "$value" ] && args="$args -ipset $value"
+	config_get_bool value "$section" no_serve_expired 0
+	[ "$value" = "1" ] && args="$args -no-serve-expired"
 	config_get value "$section" addition_flag
 	[ -n "$value" ] && args="$args $value"
 	[ -n "$args" ] || return 0
@@ -560,6 +580,13 @@ load_global()
 
 	config_get value "$section" server_name
 	[ -n "$value" ] && conf_append server-name "$value"
+	config_get value "$section" webui_enable
+	if [ -n "$value" ]; then
+		config_get_bool value "$section" webui_enable 0
+		conf_append webui-enable "$( [ "$value" = "1" ] && echo yes || echo no )"
+	fi
+	config_get value "$section" webui_bind
+	[ -n "$value" ] && conf_append webui-bind "$value"
 	config_get value "$section" speed_check_mode
 	conf_append speed-check-mode "${value:-ping,tcp:80,tcp:443}"
 	config_get value "$section" response_mode
@@ -572,6 +599,49 @@ load_global()
 		config_get value "$section" "$option"
 		[ -n "$value" ] && conf_append "$(printf '%s' "$option" | tr '_' '-')" "$value"
 	done
+
+	config_get value "$section" num_workers
+	[ -n "$value" ] && conf_append num-workers "$value"
+	config_get value "$section" cache_mem_size
+	[ -n "$value" ] && conf_append cache-mem-size "$value"
+	config_get value "$section" max_query_limit
+	[ -n "$value" ] && conf_append max-query-limit "$value"
+	config_get value "$section" serve_expired_ttl
+	[ -n "$value" ] && conf_append serve-expired-ttl "$value"
+	config_get value "$section" serve_expired_reply_ttl
+	[ -n "$value" ] && conf_append serve-expired-reply-ttl "$value"
+	config_get value "$section" serve_expired_prefetch_time
+	[ -n "$value" ] && conf_append serve-expired-prefetch-time "$value"
+	config_get value "$section" domain
+	[ -n "$value" ] && conf_append domain "$value"
+	config_get value "$section" odhcpd_lease_file
+	[ -n "$value" ] && conf_append odhcpd-lease-file "$value"
+	config_get value "$section" ipset_timeout
+	[ -n "$value" ] && conf_append ipset-timeout "$value"
+	config_get value "$section" nftset_timeout
+	[ -n "$value" ] && conf_append nftset-timeout "$value"
+	config_get value "$section" ipset_no_speed
+	[ -n "$value" ] && conf_append ipset-no-speed "$value"
+	config_get value "$section" nftset_no_speed
+	[ -n "$value" ] && conf_append nftset-no-speed "$value"
+	config_get value "$section" nftset_debug
+	[ -n "$value" ] && conf_append nftset-debug "$value"
+	config_get value "$section" log_syslog
+	[ -n "$value" ] && conf_append log-syslog "$value"
+	config_get value "$section" audit_soa
+	[ -n "$value" ] && conf_append audit-SOA "$value"
+	config_get value "$section" audit_console
+	[ -n "$value" ] && conf_append audit-console "$value"
+	config_get value "$section" audit_syslog
+	[ -n "$value" ] && conf_append audit-syslog "$value"
+	config_get value "$section" debug_save_fail_packet
+	[ -n "$value" ] && conf_append debug-save-fail-packet "$value"
+	config_get value "$section" debug_save_fail_packet_dir
+	[ -n "$value" ] && conf_append debug-save-fail-packet-dir "$value"
+	config_get value "$section" ipset_name
+	[ -n "$value" ] && conf_append ipset "/./$value"
+	config_get value "$section" nftset_name
+	[ -n "$value" ] && conf_append nftset "/./$value"
 
 	config_get_bool value "$section" cache_persist 1
 	conf_append cache-persist "$( [ "$value" = "1" ] && echo yes || echo no )"
@@ -644,6 +714,16 @@ load_global()
 		esac
 	fi
 	if [ "$tls" = "1" ] || [ "$doh" = "1" ]; then
+		config_get value "$section" bind_cert_generate
+		[ -n "$value" ] && conf_append bind-cert-generate "$value"
+		config_get value "$section" bind_cert_san
+		[ -n "$value" ] && conf_append bind-cert-san "$value"
+		config_get value "$section" bind_cert_validity_days
+		[ -n "$value" ] && conf_append bind-cert-validity-days "$value"
+		config_get value "$section" bind_cert_root_key_file
+		[ -n "$value" ] && conf_append bind-cert-root-key-file "$value"
+		config_get_bool value "$section" ddr 0
+		[ "$value" = "1" ] && flags="$flags -ddr"
 		config_get value "$section" bind_cert
 		[ -n "$value" ] && conf_append bind-cert-file "$value"
 		config_get value "$section" bind_cert_key

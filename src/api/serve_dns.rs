@@ -33,7 +33,7 @@ async fn serve_dns_get(
     req: Request,
 ) -> Response {
     // https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/
-    match process(&state, req, addr, Some(parameters)).await {
+    match process(&state.dns_handle, req, addr, Some(parameters)).await {
         Ok((content_type, bytes)) => {
             let mut res = Body::from(bytes).into_response();
             res.headers_mut()
@@ -54,7 +54,7 @@ async fn serve_dns(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
-    match process(&state, req, addr, None).await {
+    match process(&state.dns_handle, req, addr, None).await {
         Ok((content_type, bytes)) => {
             let mut res = Body::from(bytes).into_response();
             res.headers_mut()
@@ -70,7 +70,7 @@ async fn serve_dns(
 }
 
 async fn process(
-    state: &ServeState,
+    dns_handle: &crate::server::DnsHandle,
     req: Request,
     addr: SocketAddr,
     query_param: Option<QueryParam>,
@@ -90,17 +90,32 @@ async fn process(
         accept
     );
 
-    let accept_dns_message = accept == APPLICATION_DNS_MESSAGE;
+    let wire_query = query_param
+        .as_ref()
+        .is_some_and(|param| param.dns.is_some());
+    let accept_dns_message = accept == APPLICATION_DNS_MESSAGE
+        || wire_query
+        || (query_param.is_none() && accept != APPLICATION_JSON);
 
     let req_msg = match query_param {
-        Some(query_param) if !accept_dns_message => {
+        Some(QueryParam {
+            dns: Some(encoded), ..
+        }) => {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let bytes = URL_SAFE_NO_PAD.decode(encoded)?;
+            SerialMessage::binary(bytes, addr, Protocol::Https)
+        }
+        Some(query_param) => {
             // https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/
             use crate::libdns::proto::{
                 op::{Edns, Message, Query},
                 rr::{Name, RecordType},
             };
 
-            let name: Name = query_param.name.parse()?;
+            let name: Name = query_param
+                .name
+                .ok_or_else(|| anyhow::anyhow!("missing DNS query: supply dns or name"))?
+                .parse()?;
             let query_type: RecordType = query_param.query_type.parse().unwrap_or(RecordType::A);
 
             let dnssec = query_param.dnssec;
@@ -118,23 +133,20 @@ async fn process(
             SerialMessage::raw(message, addr, Protocol::Https)
         }
         _ => {
-            let bytes = Bytes::from_request(req, &state).await?;
+            let bytes = Bytes::from_request(req, &()).await?;
             SerialMessage::binary(bytes.into(), addr, Protocol::Https)
         }
     };
 
-    let res_msg = state.dns_handle.send(req_msg).await;
+    let res_msg = dns_handle.send(req_msg).await;
 
     let (content_type, bytes) = if accept_dns_message {
         (APPLICATION_DNS_MESSAGE, res_msg.try_into()?)
     } else {
-        let message = match res_msg {
-            SerialMessage::Raw(message, _, _) => message,
-            SerialMessage::Bytes(_, _, _) => Err(anyhow::anyhow!("Invliad message type"))?,
-        };
+        let message = crate::libdns::proto::op::Message::try_from(res_msg)?;
         (
             APPLICATION_JSON,
-            serde_json::to_vec(&DnsResponse::from(message.as_ref()))?,
+            serde_json::to_vec(&DnsResponse::from(&message))?,
         )
     };
 
@@ -143,8 +155,11 @@ async fn process(
 
 #[derive(Deserialize, IntoParams)]
 struct QueryParam {
+    /// Base64url encoded DNS wire query (RFC 8484).
+    dns: Option<String>,
+
     /// Query name
-    name: String,
+    name: Option<String>,
 
     /// Query type (either a numeric value or text ↗).
     #[serde(default = "QueryParam::default_query_type", rename = "type")]
@@ -225,8 +240,8 @@ impl From<&crate::libdns::proto::op::Message> for DnsResponse {
             TC: message.truncated(),
             RD: message.recursion_desired(),
             RA: message.recursion_available(),
-            AD: message.authoritative(),
-            CD: true,
+            AD: message.authentic_data(),
+            CD: message.checking_disabled(),
             Question: message
                 .queries()
                 .iter()
@@ -245,6 +260,91 @@ impl From<&crate::libdns::proto::op::Message> for DnsResponse {
                     data: r.data().to_string(),
                 })
                 .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        dns::DnsRequest,
+        libdns::proto::{
+            op::{Message, Query},
+            rr::{RData, Record},
+        },
+    };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[tokio::test]
+    async fn test_doh_get_post_wire_and_json_queries() {
+        let mut request = Message::query();
+        request.add_query(Query::query(
+            "resolver.example.".parse().unwrap(),
+            crate::dns::RecordType::A,
+        ));
+        let wire = request.to_vec().unwrap();
+        for mode in ["get", "post", "json"] {
+            let (mut incoming, dns_handle) = crate::server::DnsHandle::mock();
+            let worker = tokio::spawn(async move {
+                let (packet, _, reply) = incoming.recv().await.unwrap();
+                let request = DnsRequest::try_from(packet).unwrap();
+                assert_eq!(request.query().name().to_ascii(), "resolver.example.");
+                let mut response = request.to_response();
+                response
+                    .set_authentic_data(true)
+                    .set_checking_disabled(false);
+                response.add_answer(Record::from_rdata(
+                    request.query().name().clone().into(),
+                    30,
+                    RData::A("192.0.2.9".parse().unwrap()),
+                ));
+                assert!(reply.send(response.into()).is_ok());
+            });
+            let params = match mode {
+                "get" => Some(
+                    serde_json::from_value(
+                        serde_json::json!({"dns": URL_SAFE_NO_PAD.encode(&wire)}),
+                    )
+                    .unwrap(),
+                ),
+                "json" => Some(
+                    serde_json::from_value(serde_json::json!({"name": "resolver.example."}))
+                        .unwrap(),
+                ),
+                _ => None,
+            };
+            let request = Request::builder()
+                .method(if mode == "post" { "POST" } else { "GET" })
+                .body(Body::from(if mode == "post" {
+                    wire.clone()
+                } else {
+                    vec![]
+                }))
+                .unwrap();
+            let (content_type, body) = process(
+                &dns_handle,
+                request,
+                "127.0.0.1:12345".parse().unwrap(),
+                params,
+            )
+            .await
+            .unwrap();
+            if mode == "json" {
+                assert_eq!(content_type, "application/json");
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["Answer"][0]["data"], "192.0.2.9");
+                assert_eq!(value["AD"], true);
+                assert_eq!(value["CD"], false);
+            } else {
+                assert_eq!(content_type, "application/dns-message");
+                let response = Message::from_vec(&body).unwrap();
+                assert_eq!(
+                    response.answers()[0].data(),
+                    &RData::A("192.0.2.9".parse().unwrap())
+                );
+            }
+            worker.await.unwrap();
         }
     }
 }

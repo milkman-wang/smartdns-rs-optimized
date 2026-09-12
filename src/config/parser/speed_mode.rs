@@ -27,6 +27,7 @@ impl NomParser for SpeedCheckMode {
         let none = value(None, tag_no_case("none"));
         let ping = value(Ping, tag_no_case("ping"));
         let tcp = map(preceded(tag_no_case("tcp"), preceded(char(':'), u16)), Tcp);
+        let tcp_syn = map(preceded(tag_no_case("tcp-syn:"), u16), TcpSyn);
         let http = map(
             preceded(
                 tag_no_case("http"),
@@ -42,7 +43,7 @@ impl NomParser for SpeedCheckMode {
             Https,
         );
 
-        alt((none, ping, tcp, https, http)).parse(input)
+        alt((none, ping, tcp_syn, tcp, https, http)).parse(input)
     }
 }
 
@@ -58,6 +59,7 @@ mod tests {
         assert_eq!(SpeedCheckMode::parse("ping"), Ok(("", Ping)));
         assert_eq!(SpeedCheckMode::parse("Ping"), Ok(("", Ping)));
         assert_eq!(SpeedCheckMode::parse("tcp:96"), Ok(("", Tcp(96))));
+        assert_eq!(SpeedCheckMode::parse("tcp-syn:443"), Ok(("", TcpSyn(443))));
         assert_eq!(SpeedCheckMode::parse("http"), Ok(("", Http(80))));
         assert_eq!(SpeedCheckMode::parse("http:82"), Ok(("", Http(82))));
         assert_eq!(SpeedCheckMode::parse("https"), Ok(("", Https(443))));

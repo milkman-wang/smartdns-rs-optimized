@@ -1,5 +1,6 @@
 use crate::dns_client::{BootstrapResolver, GenericResolverExt};
 use crate::dns_url::{DnsUrl, Host, HttpsPrefer, ProtocolConfig};
+use crate::infra::packet_debug::{self, InspectedStream};
 use crate::libdns::custom::warmup::DnsHandleWarmpup;
 use crate::log;
 use crate::proxy::{self, ProxyConfig};
@@ -30,7 +31,50 @@ use crate::libdns::{
 };
 use std::borrow::Cow;
 
-pub type Connection = crate::libdns::resolver::name_server::NameServer<ConnectionProvider>;
+pub enum Connection {
+    Udp(super::udp_client::UdpClient),
+    Other(crate::libdns::resolver::name_server::NameServer<ConnectionProvider>),
+}
+
+impl Connection {
+    pub async fn lookup(
+        &self,
+        query: &proto::op::Query,
+        options: proto::xfer::DnsRequestOptions,
+        edns: Option<&proto::op::Edns>,
+    ) -> Result<crate::dns::DnsResponse, ProtoError> {
+        use proto::xfer::{DnsHandle, FirstAnswer};
+        match self {
+            Self::Udp(client) => client.lookup(query, options, edns).await,
+            Self::Other(client) => {
+                let mut message = proto::op::Message::query();
+                message
+                    .add_query(query.clone())
+                    .set_recursion_desired(options.recursion_desired);
+                *message.extensions_mut() = edns.cloned();
+                client
+                    .send(proto::xfer::DnsRequest::new(message, options))
+                    .first_answer()
+                    .await
+                    .map(Into::into)
+            }
+        }
+    }
+
+    pub async fn warmup(&self) -> Result<(), ProtoError> {
+        let request = &*super::warmup::DEFAULT_QUERY;
+        let mut options = *request.options();
+        options.recursion_desired = request.recursion_desired();
+        self.lookup(
+            &request.queries()[0],
+            options,
+            request.extensions().as_ref(),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 type RuntimeProvider = TokioRuntimeProvider;
 type Handle = TokioHandle;
 type Time = TokioTime;
@@ -49,7 +93,7 @@ pub struct ConnectionProvider {
     runtime_provider: RuntimeProvider,
 }
 
-impl ConnectionProvider {
+impl Connection {
     pub fn new(
         server: DnsUrl,
         options: Arc<ResolverOpts>,
@@ -57,20 +101,31 @@ impl ConnectionProvider {
         proxy: Option<ProxyConfig>,
         so_mark: Option<u32>,
         device: Option<String>,
-    ) -> Connection {
+    ) -> Self {
         let config = (&server).into();
+        let runtime_provider = TokioRuntimeProvider::new(proxy, so_mark, device);
+        if matches!(server.proto(), ProtocolConfig::Udp)
+            && let Some(ip) = server.ip()
+            && !ip.is_multicast()
+        {
+            return Connection::Udp(super::udp_client::UdpClient::new(
+                SocketAddr::new(ip, server.port()),
+                options,
+                runtime_provider,
+            ));
+        }
 
-        Connection::new(
+        Connection::Other(crate::libdns::resolver::name_server::NameServer::new(
             &FAKE_SERVER_CONFIG, // use ip and trust_negative_responses
             config,              // use protocol
             options.clone(),
-            Self {
+            ConnectionProvider {
                 server,
                 resolver,
                 options,
-                runtime_provider: TokioRuntimeProvider::new(proxy, so_mark, device),
+                runtime_provider,
             },
-        )
+        ))
     }
 }
 
@@ -301,14 +356,6 @@ async fn new_connection(
         }
         (ProtocolConfig::Tcp, _) => {
             use crate::libdns::proto::tcp::TcpClientStream;
-            type Connecting = DnsExchangeConnect<
-                DnsMultiplexerConnect<
-                    Pin<Box<dyn Future<Output = Result<TcpClientStream<Tcp>, ProtoError>> + Send>>,
-                    TcpClientStream<Tcp>,
-                >,
-                DnsMultiplexer<TcpClientStream<Tcp>>,
-                Time,
-            >;
 
             let (future, handle) = TcpClientStream::new(
                 server_addr,
@@ -318,8 +365,11 @@ async fn new_connection(
             );
 
             // TODO: need config for Signer...
+            let future = future
+                .map(|result| result.map(|stream| InspectedStream::new(stream, "tcp")))
+                .boxed();
             let dns_conn = DnsMultiplexer::with_timeout(future, handle, options.timeout, None);
-            let exchange: Connecting = DnsExchange::connect(dns_conn);
+            let exchange = DnsExchange::connect::<_, _, Time>(dns_conn);
             let (conn, bg) = exchange.await?;
             spawner.spawn_bg(bg);
 
@@ -327,23 +377,8 @@ async fn new_connection(
         }
         #[cfg(feature = "dns-over-tls")]
         (ProtocolConfig::Tls, _) => {
-            use crate::libdns::proto::rustls::TlsClientStream;
             use crate::libdns::proto::rustls::tls_client_stream::tls_client_connect_with_future;
             use rustls::pki_types::ServerName;
-            type Connecting = DnsExchangeConnect<
-                DnsMultiplexerConnect<
-                    Pin<
-                        Box<
-                            dyn Future<Output = Result<TlsClientStream<Tcp>, ProtoError>>
-                                + Send
-                                + 'static,
-                        >,
-                    >,
-                    TlsClientStream<Tcp>,
-                >,
-                DnsMultiplexer<TlsClientStream<Tcp>>,
-                Time,
-            >;
 
             let timeout = options.timeout;
             let tcp_future = runtime_proviver.connect_tcp(server_addr, None, None);
@@ -368,8 +403,12 @@ async fn new_connection(
                 Arc::new(tls_config),
             );
 
-            let exchange: Connecting =
-                DnsExchange::connect(DnsMultiplexer::with_timeout(stream, handle, timeout, None));
+            let stream = stream
+                .map(|result| result.map(|stream| InspectedStream::new(stream, "tls")))
+                .boxed();
+            let exchange = DnsExchange::connect::<_, _, Time>(DnsMultiplexer::with_timeout(
+                stream, handle, timeout, None,
+            ));
 
             let (conn, bg) = exchange.await?;
             spawner.spawn_bg(bg);
@@ -644,6 +683,7 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
                 let mut buf = tokio::io::ReadBuf::new(buf);
                 let addr = ready!(tokio::net::UdpSocket::poll_recv_from(s, cx, &mut buf))?;
                 let len = buf.filled().len();
+                packet_debug::check_received(addr, "udp", buf.filled());
                 Poll::Ready(Ok((len, addr)))
             }
             UdpSocket::Proxy(s) => {
@@ -655,6 +695,7 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
                         Err(io::Error::other("Expect IP address"))?
                     }
                 };
+                packet_debug::check_received(addr, "udp", &buf[..len]);
                 Poll::Ready(Ok((len, addr)))
             }
         }
@@ -697,6 +738,7 @@ impl proto::udp::DnsUdpSocket for UdpSocket {
                 Ok((len, addr))
             }
         }?;
+        packet_debug::check_received(addr, "udp", &buf[..len]);
         Ok((len, addr))
     }
 

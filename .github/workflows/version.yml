@@ -11,6 +11,9 @@ on:
         options: [major, minor, patch, rc, beta, alpha]
         default: 'patch'
 
+permissions:
+  contents: write
+
 jobs:
   bump:
     runs-on: ubuntu-latest
@@ -49,6 +52,14 @@ jobs:
     needs: [ "bump" ]
     uses: ./.github/workflows/build.yml
     with:
+      version: ${{ needs.bump.outputs.version }}
+      prerelease: ${{ !contains('major, minor, patch', inputs.bump) }}
+
+  build_webui:
+    needs: ["bump"]
+    uses: ./.github/workflows/build.yml
+    with:
+      variant: webui
       version: ${{ needs.bump.outputs.version }}
       prerelease: ${{ !contains('major, minor, patch', inputs.bump) }}
 

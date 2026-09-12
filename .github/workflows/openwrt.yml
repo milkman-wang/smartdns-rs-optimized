@@ -1,327 +1,43 @@
-name: OpenWrt packages
+name: OpenWrt Headless packages
 
 on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish a GitHub Release after every architecture succeeds
+        description: Publish this variant after every architecture succeeds
         required: true
         type: boolean
         default: true
   pull_request:
-    branches:
-      - main
-      - release/**
+    branches: [main, 'release/**']
     paths:
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "build.rs"
-      - "include/**"
-      - "src/**"
-      - "contrib/openwrt/**"
-      - ".github/workflows/openwrt.yml"
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'src/**'
+      - 'contrib/openwrt/**'
+      - '.github/workflows/openwrt*.yml'
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "build.rs"
-      - "include/**"
-      - "src/**"
-      - "contrib/openwrt/**"
-      - ".github/workflows/openwrt.yml"
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'src/**'
+      - 'contrib/openwrt/**'
+      - '.github/workflows/openwrt*.yml'
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 concurrency:
-  group: openwrt-${{ github.ref }}
+  group: openwrt-headless-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  contract:
-    name: Rust/UCI/LuCI contract
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.package.outputs.version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install static analysis tools
-        run: sudo apt-get update && sudo apt-get install -y gettext shellcheck
-
-      - name: Setup Rust
-        uses: ./.github/actions/setup
-        with:
-          rust_toolchain: stable
-          install_cross: "false"
-          install_wix: "false"
-          install_cargo_edit: "false"
-
-      - name: Read package version
-        id: package
-        shell: bash
-        run: |
-          version="$(sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
-          test -n "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Check interface contract
-        run: |
-          python3 contrib/openwrt/tests/check_contract.py
-          sh contrib/openwrt/tests/generate_config.sh
-          sh contrib/openwrt/tests/dnsmasq_state.sh
-
-      - name: Check shell
-        run: |
-          shellcheck -s sh \
-            contrib/openwrt/smartdns-rs/files/etc/init.d/smartdns \
-            contrib/openwrt/smartdns-rs/files/etc/uci-defaults/90-smartdns-rs \
-            contrib/openwrt/luci-app-smartdns-rs/root/usr/libexec/smartdns-rs-call \
-            contrib/openwrt/tests/generate_config.sh \
-            contrib/openwrt/tests/dnsmasq_state.sh
-
-      - name: Check LuCI JavaScript and translations
-        run: |
-          node --check contrib/openwrt/luci-app-smartdns-rs/htdocs/luci-static/resources/view/smartdns/smartdns.js
-          node --check contrib/openwrt/luci-app-smartdns-rs/htdocs/luci-static/resources/view/smartdns/log.js
-          msgfmt --check --output-file=/dev/null contrib/openwrt/luci-app-smartdns-rs/po/zh_Hans/smartdns-rs.po
-
-      - name: Test Rust compatibility parser
-        run: |
-          cargo test --locked --no-default-features --features openwrt config::parser::domain_rule::tests
-          cargo test --locked --no-default-features --features openwrt test_speed_response
-
-  sdk:
-    name: OpenWrt SDK (${{ matrix.arch }})
-    needs: contract
-    runs-on: ubuntu-latest
-    # Snapshot SDKs build rust/host from source on a cold runner. Slower 32-bit
-    # targets can exceed two hours before compiling SmartDNS-rs itself.
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_generic
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a15_neon-vfpv4
-          - i386_pentium4
-          - mips_24kc
-          - mipsel_24kc
-          - x86_64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Pin package source to this revision
-        env:
-          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        shell: bash
-        run: |
-          archive="$(mktemp)"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REVISION}"
-          source_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
-          sed -i \
-            -e "s|^PKG_SOURCE_VERSION:=.*|PKG_SOURCE_VERSION:=${SOURCE_REVISION}|" \
-            -e "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/\$(PKG_SOURCE_VERSION)?|" \
-            -e "s|^PKG_HASH:=.*|PKG_HASH:=${source_hash}|" \
-            contrib/openwrt/smartdns-rs/Makefile
-
-      - name: Set monotonic package revision
-        shell: bash
-        run: |
-          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${GITHUB_RUN_NUMBER}/" contrib/openwrt/smartdns-rs/Makefile
-          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${GITHUB_RUN_NUMBER}/" contrib/openwrt/luci-app-smartdns-rs/Makefile
-
-      - name: Build packages
-        uses: openwrt/gh-action-sdk@v11
-        env:
-          ARCH: ${{ matrix.arch }}
-          BUILD_LOG: 1
-          NO_REFRESH_CHECK: 1
-          PACKAGES: smartdns-rs luci-app-smartdns-rs
-          V: s
-
-      - name: Upload packages and logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-apk-${{ matrix.arch }}-${{ github.sha }}
-          path: |
-            bin/packages/**/*.apk
-            bin/packages/**/*.ipk
-            logs/**
-          if-no-files-found: error
-          retention-days: 14
-
-  sdk_ipk:
-    name: OpenWrt 24.10 IPK (${{ matrix.arch }})
-    needs: contract
-    runs-on: ubuntu-latest
-    # The 24.10 package feed currently builds Rust from source. Keep the same
-    # allowance as the snapshot matrix for slower 32-bit targets.
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_generic
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a15_neon-vfpv4
-          - i386_pentium4
-          - mips_24kc
-          - mipsel_24kc
-          - x86_64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Pin package source to this revision
-        env:
-          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        shell: bash
-        run: |
-          archive="$(mktemp)"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REVISION}"
-          source_hash="$(sha256sum "$archive" | cut -d' ' -f1)"
-          sed -i \
-            -e "s|^PKG_SOURCE_VERSION:=.*|PKG_SOURCE_VERSION:=${SOURCE_REVISION}|" \
-            -e "s|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/\$(PKG_SOURCE_VERSION)?|" \
-            -e "s|^PKG_HASH:=.*|PKG_HASH:=${source_hash}|" \
-            contrib/openwrt/smartdns-rs/Makefile
-
-      - name: Set monotonic package revision
-        shell: bash
-        run: |
-          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${GITHUB_RUN_NUMBER}/" contrib/openwrt/smartdns-rs/Makefile
-          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${GITHUB_RUN_NUMBER}/" contrib/openwrt/luci-app-smartdns-rs/Makefile
-
-      - name: Allow the OpenWrt 24.10 Rust toolchain
-        shell: bash
-        run: |
-          # The 24.10 feed has Rust 1.94 while upstream declares 1.96. Cargo
-          # still reports real compiler/API errors; this only bypasses the
-          # manifest's version gate and is verified by compiling every target.
-          sed -i '/CARGO_PKG_ARGS+=--no-default-features/a CARGO_PKG_ARGS+=--ignore-rust-version' \
-            contrib/openwrt/smartdns-rs/Makefile
-
-      - name: Build IPK packages
-        uses: openwrt/gh-action-sdk@v11
-        env:
-          ARCH: ${{ matrix.arch }}-24.10.7
-          BUILD_LOG: 1
-          NO_REFRESH_CHECK: 1
-          PACKAGES: smartdns-rs luci-app-smartdns-rs
-          V: s
-
-      - name: Upload packages and logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-ipk-${{ matrix.arch }}-${{ github.sha }}
-          path: |
-            bin/packages/**/*.ipk
-            logs/**
-          if-no-files-found: error
-          retention-days: 14
-
-  release:
-    name: Publish OpenWrt release
-    needs:
-      - contract
-      - sdk
-      - sdk_ipk
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish)
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-    steps:
-      - name: Download architecture artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: openwrt-*-${{ github.sha }}
-          path: artifacts
-
-      - name: Collect packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir release
-          while IFS= read -r -d '' package; do
-            name="$(basename "$package")"
-            safe_name="${name//\~/.}"
-            artifact="${package#artifacts/}"
-            artifact="${artifact%%/*}"
-            case "$artifact" in
-              openwrt-apk-*) arch="${artifact#openwrt-apk-}" ;;
-              openwrt-ipk-*) arch="${artifact#openwrt-ipk-}" ;;
-              *) continue ;;
-            esac
-            arch="${arch%-$GITHUB_SHA}"
-
-            case "$name" in
-              smartdns-rs-*.apk)
-                cp "$package" "release/${safe_name%.apk}-$arch.apk"
-                ;;
-              smartdns-rs_*.ipk)
-                cp "$package" "release/$safe_name"
-                ;;
-              luci-app-smartdns-rs-*.apk|luci-i18n-smartdns-rs-zh-cn-*.apk|luci-app-smartdns-rs_*.ipk|luci-i18n-smartdns-rs-zh-cn_*.ipk)
-                test -e "release/$safe_name" || cp "$package" "release/$safe_name"
-                ;;
-            esac
-          done < <(find artifacts -type f -path '*/bin/packages/*/action/*' \( -name '*.ipk' -o -name '*.apk' \) -print0)
-
-          test "$(find release -maxdepth 1 -type f -name 'smartdns-rs-*.apk' | wc -l)" -eq 9
-          test "$(find release -maxdepth 1 -type f -name 'smartdns-rs_*.ipk' | wc -l)" -eq 9
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs-*.apk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs_*.ipk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-i18n-smartdns-rs-zh-cn-*.apk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-i18n-smartdns-rs-zh-cn_*.ipk' | wc -l)" -eq 1
-          (cd release && sha256sum * | sort -k2 > SHA256SUMS)
-          printf '%s\n' \
-            "Source commit: $GITHUB_SHA" \
-            "OpenWrt architectures: aarch64_cortex-a53, aarch64_cortex-a72, aarch64_generic, arm_cortex-a7_neon-vfpv4, arm_cortex-a15_neon-vfpv4, i386_pentium4, mips_24kc, mipsel_24kc, x86_64" \
-            "APK packages target current OpenWrt snapshots; IPK packages target OpenWrt 24.10.7." \
-            "APK core assets include the OpenWrt architecture in the file name; LuCI packages are architecture-independent." \
-            "Use IPK with opkg firmware and APK with apk firmware; package formats are not interchangeable." \
-            > release-notes.txt
-
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.contract.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="openwrt-v${VERSION}-r${GITHUB_RUN_NUMBER}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release/* --clobber
-          else
-            gh release create "$tag" release/* \
-              --target "$GITHUB_SHA" \
-              --title "SmartDNS-rs OpenWrt v${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-              --notes-file release-notes.txt \
-              --latest
-          fi
+  packages:
+    uses: ./.github/workflows/openwrt-build.yml
+    with:
+      variant: headless
+      publish: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}

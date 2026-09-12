@@ -35,13 +35,8 @@ impl LocalPtrZoneProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl ZoneProvider for LocalPtrZoneProvider {
-    async fn lookup(
-        &self,
-        ctx: &DnsContext,
-        req: &DnsRequest,
-    ) -> Result<Option<DnsResponse>, DnsError> {
+    fn lookup(&self, ctx: &DnsContext, req: &DnsRequest) -> Result<Option<DnsResponse>, DnsError> {
         if req.query().query_type() != RecordType::PTR {
             return Ok(None);
         }

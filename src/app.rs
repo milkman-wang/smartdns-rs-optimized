@@ -3,14 +3,11 @@ use std::{
     ops::{Deref, DerefMut},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
-use tokio::{
-    sync::{RwLock, Semaphore},
-    task::JoinSet,
-};
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::{
     config::ServerOpts,
@@ -20,7 +17,7 @@ use crate::{
     dns_mw::{DnsMiddlewareBuilder, DnsMiddlewareHandler},
     dns_mw_cache::DnsCache,
     log,
-    server::{DnsHandle, IncomingDnsRequest, ServerHandle},
+    server::{DnsHandle, ServerHandle},
     third_ext::FutureJoinAllExt as _,
 };
 
@@ -28,32 +25,42 @@ use crate::{
 pub struct App(Arc<AppState>);
 
 impl App {
-    fn new(cfg: Arc<RuntimeConfig>) -> (IncomingDnsRequest, Self) {
+    pub(crate) fn new(cfg: Arc<RuntimeConfig>) -> Self {
         let handler = DnsMiddlewareBuilder::new().build(cfg.clone());
-
-        let (rx, dns_handle) = DnsHandle::new();
-
-        (
-            rx,
-            Self(
-                AppState {
-                    dns_handle,
-                    cfg: RwLock::new(cfg),
-                    mw_handler: RwLock::new(Arc::new(handler)),
-                    listeners: Default::default(),
-                    cache: RwLock::const_new(None),
-                    uptime: Instant::now(),
-                    loaded_at: RwLock::const_new(Instant::now()),
-                    active_queries: Default::default(),
-                    guard: AppGuard,
-                }
-                .into(),
-            ),
+        let dispatcher = Arc::new(QueryDispatcher::new(Arc::new(handler)));
+        let dns_handle = DnsHandle::new(Arc::downgrade(&dispatcher));
+        Self(
+            AppState {
+                dns_handle,
+                cfg: RwLock::new(cfg),
+                dispatcher,
+                listeners: Default::default(),
+                #[cfg(feature = "webui")]
+                webui_server: RwLock::new(None),
+                cache: RwLock::const_new(None),
+                uptime: Instant::now(),
+                loaded_at: RwLock::const_new(Instant::now()),
+                guard: AppGuard,
+            }
+            .into(),
         )
     }
 
     pub async fn cache(&self) -> Option<Arc<DnsCache>> {
         self.cache.read().await.clone()
+    }
+
+    pub fn dns_handle(&self) -> DnsHandle {
+        self.dns_handle.clone()
+    }
+
+    pub async fn query(
+        &self,
+        request: &DnsRequest,
+        options: &ServerOpts,
+    ) -> Result<DnsResponse, crate::dns::DnsError> {
+        let handler = self.dispatcher.handler();
+        handler.search(request, options).await
     }
 
     pub async fn cfg(&self) -> Arc<RuntimeConfig> {
@@ -63,7 +70,17 @@ impl App {
     pub async fn reload(&self) -> anyhow::Result<()> {
         log::info!("reloading configuration...");
         let cfg = self.cfg().await;
-        let cfg = cfg.reload_new()?;
+        let replacement = cfg.reload_new()?;
+        anyhow::ensure!(
+            cfg.webui_enabled() == replacement.webui_enabled()
+                && cfg.webui_address() == replacement.webui_address(),
+            "changing the WebUI listener requires a service restart"
+        );
+        let cfg = replacement;
+        crate::infra::packet_debug::configure(
+            cfg.debug_save_fail_packet,
+            cfg.debug_save_fail_packet_dir.as_deref(),
+        );
         *self.cfg.write().await = cfg;
         self.update_middleware_handler().await;
         self.update_listeners().await;
@@ -83,15 +100,27 @@ impl App {
     }
 
     pub fn active_queries(&self) -> usize {
-        self.active_queries.load(Ordering::Relaxed)
+        self.dispatcher.active_queries.load(Ordering::Relaxed)
     }
 
-    async fn init(&self) {
+    async fn init(&self) -> anyhow::Result<()> {
+        let cfg = self.cfg().await;
+        anyhow::ensure!(
+            cfg!(feature = "webui") || !cfg.webui_enabled(),
+            "WebUI is not included in this headless build; install the WebUI version"
+        );
         self.update_middleware_handler().await;
+        crate::plugins::initialize(self.cfg().await, self.clone()).await?;
+        #[cfg(feature = "webui")]
+        if cfg.webui_enabled() {
+            *self.webui_server.write().await =
+                Some(crate::webui::serve(self.clone(), cfg.webui_address()).await?);
+        }
         self.update_listeners().await;
         crate::banner();
         log::info!("awaiting connections...");
         log::info!("server starting up");
+        Ok(())
     }
 
     async fn update_listeners(&self) {
@@ -133,19 +162,9 @@ impl App {
             let dns_handle = &self.dns_handle;
 
             let idle_time = cfg.tcp_idle_time();
-            let certificate_file = cfg.bind_cert_file();
-            let certificate_key_file = cfg.bind_cert_key_file();
 
             for bind_addr in new_bind_addrs {
-                let serve_handle = server::serve(
-                    self,
-                    &cfg,
-                    bind_addr,
-                    dns_handle,
-                    idle_time,
-                    certificate_file,
-                    certificate_key_file,
-                );
+                let serve_handle = server::serve(self, &cfg, bind_addr, dns_handle, idle_time);
 
                 match serve_handle {
                     Ok(server) => {
@@ -178,7 +197,7 @@ impl App {
             &mut cache,
         );
 
-        *self.mw_handler.write().await = middleware_handler;
+        *self.dispatcher.handler.write().unwrap() = middleware_handler;
     }
 }
 
@@ -192,19 +211,82 @@ impl std::ops::Deref for App {
 
 pub struct AppState {
     cfg: RwLock<Arc<RuntimeConfig>>,
-    mw_handler: RwLock<Arc<DnsMiddlewareHandler>>,
+    dispatcher: Arc<QueryDispatcher>,
     dns_handle: DnsHandle,
     listeners: RwLock<HashMap<crate::config::BindAddrConfig, ServerHandle>>,
+    #[cfg(feature = "webui")]
+    webui_server: RwLock<Option<crate::webui::Server>>,
     cache: RwLock<Option<Arc<DnsCache>>>,
     uptime: Instant,
     loaded_at: RwLock<Instant>,
-    active_queries: AtomicUsize,
     guard: AppGuard,
 }
 
+/// Shared execution state; transports run the middleware in their request task.
+/// Background handles hold a weak reference so cached prefetch state cannot
+/// keep an obsolete dispatcher alive after shutdown.
+pub(crate) struct QueryDispatcher {
+    handler: std::sync::RwLock<Arc<DnsMiddlewareHandler>>,
+    active_queries: AtomicUsize,
+    started: Instant,
+    idle_deadline_ms: AtomicU64,
+    background_concurrency: Semaphore,
+}
+
+impl QueryDispatcher {
+    const MAX_IDLE_MS: u64 = 30 * 60 * 1000;
+
+    fn new(handler: Arc<DnsMiddlewareHandler>) -> Self {
+        Self {
+            handler: std::sync::RwLock::new(handler),
+            active_queries: AtomicUsize::new(0),
+            started: Instant::now(),
+            idle_deadline_ms: AtomicU64::new(Self::MAX_IDLE_MS),
+            background_concurrency: Semaphore::new(16),
+        }
+    }
+
+    fn handler(&self) -> Arc<DnsMiddlewareHandler> {
+        self.handler.read().unwrap().clone()
+    }
+
+    pub(crate) async fn send(&self, message: SerialMessage, opts: &ServerOpts) -> SerialMessage {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let _permit = if opts.is_background {
+            if elapsed_ms >= self.idle_deadline_ms.load(Ordering::Relaxed) {
+                return crate::server::refused_response(message);
+            }
+            Some(self.background_concurrency.acquire().await.unwrap())
+        } else {
+            self.idle_deadline_ms
+                .fetch_max(elapsed_ms + Self::MAX_IDLE_MS, Ordering::Relaxed);
+            None
+        };
+        let _active = ActiveQueryGuard::new(&self.active_queries);
+        process(self.handler(), message, opts).await
+    }
+}
+
+struct ActiveQueryGuard<'a>(&'a AtomicUsize);
+impl<'a> ActiveQueryGuard<'a> {
+    fn new(active: &'a AtomicUsize) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self(active)
+    }
+}
+impl Drop for ActiveQueryGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub fn serve(cfg: Arc<RuntimeConfig>) {
-    let (mut incoming_request, app) = App::new(cfg.clone());
-    let app = Arc::new(app);
+    crate::signal::reset();
+    crate::infra::packet_debug::configure(
+        cfg.debug_save_fail_packet,
+        cfg.debug_save_fail_packet_dir.as_deref(),
+    );
+    let app = App::new(cfg.clone());
 
     let log_dispatch = log::make_dispatch(
         cfg.log_file(),
@@ -215,10 +297,18 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
         cfg.log_num(),
         cfg.log_file_mode().into(),
         cfg.log_config().console(),
+        cfg.log_config().syslog.unwrap_or(false),
     );
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cfg.num_workers())
+    let _main_log_guard = log::set_default(&log_dispatch);
+    let mut runtime = if cfg.num_workers() == 1 {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        let mut runtime = tokio::runtime::Builder::new_multi_thread();
+        runtime.worker_threads(cfg.num_workers());
+        runtime
+    };
+    let runtime = runtime
         .enable_all()
         .thread_name("smartdns-runtime")
         .on_thread_start(move || {
@@ -232,91 +322,9 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
 
     let _guard = runtime.enter();
 
-    runtime.block_on(app.init());
-
-    {
-        let app = app.clone();
-        runtime.spawn(async move {
-            use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-
-            // todo:// manage concurrent requests.
-
-            let mut inner_join_set = JoinSet::new();
-
-            let mut last_activity = Instant::now();
-
-            const MAX_IDLE: Duration = Duration::from_secs(30 * 60); // 30 min
-
-            const BATCH_SIZE: usize = 256;
-
-            let background_concurrency = Arc::new(Semaphore::new(16));
-            let mut bg_batch = FuturesUnordered::new();
-            let mut requests = Vec::with_capacity(BATCH_SIZE);
-
-            loop {
-                let count = incoming_request.recv_many(&mut requests, BATCH_SIZE).await;
-                if count == 0 {
-                    continue;
-                }
-
-                app.active_queries.fetch_add(count, Ordering::Relaxed);
-
-                let handler = app.mw_handler.read().await.clone();
-
-                let mut batch = FuturesUnordered::new();
-
-                while let Some((message, server_opts, sender)) = requests.pop() {
-                    let handler = handler.clone();
-                    if server_opts.is_background {
-                        if Instant::now() - last_activity < MAX_IDLE {
-                            bg_batch.push(async move {
-                                let _ = sender.send(process(handler, message, server_opts).await);
-                            });
-                        }
-                    } else {
-                        last_activity = Instant::now();
-                        batch.push(async move {
-                            let _ = sender.send(process(handler, message, server_opts).await);
-                        });
-                    }
-                }
-
-                if !bg_batch.is_empty()
-                    && let Ok(permit) = background_concurrency.clone().try_acquire_owned()
-                {
-                    let mut batch = FuturesUnordered::new();
-                    std::mem::swap(&mut batch, &mut bg_batch);
-                    inner_join_set.spawn(async move {
-                        let count = batch.len();
-                        while (batch.next().await).is_some() {}
-                        drop(permit);
-                        count
-                    });
-                }
-
-                if !batch.is_empty() {
-                    inner_join_set.spawn(async move {
-                        let count = batch.len();
-                        while (batch.next().await).is_some() {}
-                        count
-                    });
-                }
-
-                let finished = reap_tasks(&mut inner_join_set);
-                app.active_queries.fetch_sub(finished, Ordering::Relaxed);
-            }
-
-            fn reap_tasks(join_set: &mut JoinSet<usize>) -> usize {
-                let mut total = 0;
-                while let Some(count) = join_set.join_next().now_or_never().flatten() {
-                    if let Ok(count) = count {
-                        total += count;
-                    }
-                }
-                total
-            }
-        });
-    }
+    runtime
+        .block_on(app.init())
+        .expect("failed to initialize SmartDNS");
 
     let shutdown_timeout = Duration::from_secs(5);
 
@@ -324,6 +332,10 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
         use crate::signal;
         let _ = signal::terminate().await;
         // close all servers.
+        #[cfg(feature = "webui")]
+        if let Some(server) = app.webui_server.write().await.take() {
+            server.shutdown().await;
+        }
         let mut shutdown_listeners = Default::default();
         std::mem::swap(
             app.listeners.write().await.deref_mut(),
@@ -337,6 +349,7 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
     });
 
     runtime.shutdown_timeout(shutdown_timeout);
+    crate::plugins::shutdown();
 }
 
 struct AppGuard;
@@ -344,7 +357,7 @@ struct AppGuard;
 async fn process(
     handler: Arc<DnsMiddlewareHandler>,
     message: SerialMessage,
-    server_opts: ServerOpts,
+    server_opts: &ServerOpts,
 ) -> SerialMessage {
     use crate::libdns::proto::ProtoError;
     use crate::libdns::proto::op::{Header, Message, MessageType, OpCode, ResponseCode};
@@ -367,7 +380,7 @@ async fn process(
 
                             let response = {
                                 let start = Instant::now();
-                                let res = handler.search(&request, &server_opts).await;
+                                let res = handler.search(&request, server_opts).await;
 
                                 log::debug!(
                                     "{}Request: {:?}",
@@ -431,18 +444,20 @@ async fn process(
                                 }
                             };
 
-                            let response_message: Message =
-                                response.into_message(Some(response_header));
-
-                            SerialMessage::raw(response_message, addr, protocol)
+                            SerialMessage::reply(response, response_header, addr, protocol)
                         }
-                        OpCode::Status => todo!(),
-                        OpCode::Notify => todo!(),
-                        OpCode::Update => todo!(),
-                        OpCode::Unknown(_) => todo!(),
+                        OpCode::Status | OpCode::Notify | OpCode::Update | OpCode::Unknown(_) => {
+                            let mut response = request.to_response();
+                            response.set_response_code(ResponseCode::NotImp);
+                            SerialMessage::raw(response, addr, protocol)
+                        }
                     }
                 }
-                MessageType::Response => todo!(),
+                MessageType::Response => {
+                    let mut response = request.to_response();
+                    response.set_response_code(ResponseCode::FormErr);
+                    SerialMessage::raw(response, addr, protocol)
+                }
             }
         }
         Err(ProtoError { kind, .. }) if kind.as_form_error().is_some() => {
@@ -494,14 +509,14 @@ fn build_middleware(
     let middleware_handler = {
         let mut builder = DnsMiddlewareBuilder::new();
 
+        // Observe final TTLs and local/cache responses as well as upstream answers.
+        if crate::dns_mw_nftset::DnsNftsetMiddleware::is_configured(cfg) {
+            builder = builder.with(crate::dns_mw_nftset::DnsNftsetMiddleware);
+        }
+
         // check if audit enabled.
-        if cfg.audit_enable() && cfg.audit_file().is_some() {
-            builder = builder.with(DnsAuditMiddleware::new(
-                cfg.audit_file().unwrap(),
-                cfg.audit_size(),
-                cfg.audit_num(),
-                cfg.audit_file_mode().into(),
-            ));
+        if cfg.audit_enable() {
+            builder = builder.with(DnsAuditMiddleware::new(cfg));
         }
 
         if cfg.rule_groups().values().any(|x| !x.cnames.is_empty()) {
@@ -527,15 +542,15 @@ fn build_middleware(
 
         builder = builder.with(DnsZoneMiddleware::new());
 
-        if cfg.resolv_hostanme() {
-            builder = builder.with(DnsHostsMiddleware::new());
+        if let Some(path) = cfg.odhcpd_lease_file.as_ref() {
+            builder = builder.with(crate::dns_mw_odhcpd::OdhcpdMiddleware::new(
+                path.clone(),
+                cfg.domain().cloned(),
+            ));
         }
 
-        // nftset
-        #[cfg(all(feature = "nft", target_os = "linux"))]
-        {
-            use crate::dns_mw_nftset::DnsNftsetMiddleware;
-            builder = builder.with(DnsNftsetMiddleware);
+        if cfg.resolv_hostanme() {
+            builder = builder.with(DnsHostsMiddleware::new());
         }
 
         // check if cache enabled.
@@ -545,7 +560,9 @@ fn build_middleware(
             builder = builder.with(cache_middleware);
         }
 
-        builder = builder.with(DnsDualStackIpSelectionMiddleware);
+        if DnsDualStackIpSelectionMiddleware::is_configured(cfg) {
+            builder = builder.with(DnsDualStackIpSelectionMiddleware);
+        }
 
         if !cfg.bogus_nxdomain().is_empty() {
             builder = builder.with(DnsBogusMiddleware);
@@ -572,6 +589,119 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn direct_dispatch_keeps_reload_and_shutdown_visible_to_existing_handles() {
+        let app = App::new(Arc::new(RuntimeConfig::default()));
+        let handle = app.dns_handle();
+        let query = Query::query("reload.example.".parse().unwrap(), RecordType::A);
+        let mut request = Message::new(2468, MessageType::Query, OpCode::Query);
+        request.add_query(query.clone());
+        for ip in ["192.0.2.1", "192.0.2.2"] {
+            *app.dispatcher.handler.write().unwrap() = Arc::new(
+                DnsMockMiddleware::builder()
+                    .with_a_record(query.name().clone(), ip.parse().unwrap())
+                    .build(RuntimeConfig::default()),
+            );
+            let response = Message::try_from(handle.send(request.clone()).await).unwrap();
+            assert_eq!(response.id(), 2468);
+            assert_eq!(
+                response.answers()[0].data().ip_addr(),
+                Some(ip.parse().unwrap())
+            );
+            assert_eq!(app.active_queries(), 0);
+        }
+        drop(app);
+        let response = Message::try_from(handle.send(request).await).unwrap();
+        assert_eq!(response.id(), 2468);
+        assert_eq!(response.queries(), &[query]);
+        assert_eq!(response.response_code(), ResponseCode::Refused);
+    }
+
+    struct WaitingMiddleware(Arc<tokio::sync::Notify>);
+
+    #[async_trait::async_trait]
+    impl
+        crate::middleware::Middleware<
+            crate::dns::DnsContext,
+            DnsRequest,
+            DnsResponse,
+            crate::dns::DnsError,
+        > for WaitingMiddleware
+    {
+        async fn handle(
+            &self,
+            _: &mut crate::dns::DnsContext,
+            _: &DnsRequest,
+            _: crate::middleware::Next<
+                '_,
+                crate::dns::DnsContext,
+                DnsRequest,
+                DnsResponse,
+                crate::dns::DnsError,
+            >,
+        ) -> Result<DnsResponse, crate::dns::DnsError> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_direct_query_releases_activity_and_background_permit() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dispatcher = Arc::new(QueryDispatcher::new(Arc::new(
+            DnsMiddlewareBuilder::new()
+                .with(WaitingMiddleware(entered.clone()))
+                .build(Arc::new(RuntimeConfig::default())),
+        )));
+        let handle = DnsHandle::new(Arc::downgrade(&dispatcher)).with_new_opt(ServerOpts {
+            is_background: true,
+            ..Default::default()
+        });
+        let task = tokio::spawn(async move {
+            let mut request = Message::query();
+            request.add_query(Query::query(
+                "wait.example.".parse().unwrap(),
+                RecordType::A,
+            ));
+            handle.send(request).await
+        });
+        entered.notified().await;
+        assert_eq!(dispatcher.active_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(dispatcher.background_concurrency.available_permits(), 15);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(dispatcher.active_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(dispatcher.background_concurrency.available_permits(), 16);
+    }
+
+    #[tokio::test]
+    async fn foreground_activity_resumes_prefetch_after_idle_timeout() {
+        let query = Query::query("idle.example.".parse().unwrap(), RecordType::A);
+        let dispatcher = QueryDispatcher::new(Arc::new(
+            DnsMockMiddleware::builder()
+                .with_a_record(query.name().clone(), "192.0.2.3".parse().unwrap())
+                .build(RuntimeConfig::default()),
+        ));
+        dispatcher.idle_deadline_ms.store(0, Ordering::Relaxed);
+        let dispatcher = Arc::new(dispatcher);
+        let foreground = DnsHandle::new(Arc::downgrade(&dispatcher));
+        let background = foreground.with_new_opt(ServerOpts {
+            is_background: true,
+            ..Default::default()
+        });
+        let mut request = Message::query();
+        request.add_query(query);
+        let response = Message::try_from(background.send(request.clone()).await).unwrap();
+        assert_eq!(response.response_code(), ResponseCode::Refused);
+        for handle in [&foreground, &background] {
+            let response = Message::try_from(handle.send(request.clone()).await).unwrap();
+            assert_eq!(
+                response.answers()[0].data().ip_addr(),
+                Some("192.0.2.3".parse().unwrap())
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_query_final_packet_preserves_response_codes() {
         let query = Query::query("alias.example.".parse().unwrap(), RecordType::A);
         let mut cases: Vec<(ResponseCode, Result<DnsResponse, LookupError>)> = Vec::new();
@@ -588,6 +718,7 @@ mod tests {
         }
         cases.push((ResponseCode::ServFail, Err(ProtoErrorKind::Timeout.into())));
         cases.push((ResponseCode::NXDomain, Err(ResponseCode::NXDomain.into())));
+        cases.push((ResponseCode::Refused, Err(ResponseCode::Refused.into())));
 
         let mut response = DnsResponse::new_with_max_ttl(
             query.clone(),
@@ -613,7 +744,19 @@ mod tests {
         ));
         cases.push((ResponseCode::NXDomain, Ok(response)));
 
+        let mut truncated = DnsResponse::new_with_max_ttl(
+            query.clone(),
+            [Record::from_rdata(
+                query.name().clone(),
+                30,
+                "192.0.2.1".parse::<std::net::IpAddr>().unwrap().into(),
+            )],
+        );
+        truncated.set_truncated(true);
+        cases.push((ResponseCode::NoError, Ok(truncated)));
+
         for (code, result) in cases {
+            let truncated = result.as_ref().is_ok_and(|r| r.truncated());
             let answers = result
                 .as_ref()
                 .map(|r| r.answers().to_vec())
@@ -630,11 +773,12 @@ mod tests {
             let mut request = Message::new(1234, MessageType::Query, OpCode::Query);
             request.set_recursion_desired(true);
             request.add_query(query.clone());
-            let packet = process(handler, request.into(), ServerOpts::default()).await;
+            let packet = process(handler, request.into(), &ServerOpts::default()).await;
             let bytes: Vec<u8> = packet.try_into().unwrap();
             let response = Message::from_vec(&bytes).unwrap();
             assert_eq!(response.id(), 1234);
             assert_eq!(response.response_code(), code);
+            assert_eq!(response.truncated(), truncated);
             assert_eq!(response.queries(), std::slice::from_ref(&query));
             assert_eq!(response.answers(), answers);
             assert_eq!(response.authorities(), authorities);

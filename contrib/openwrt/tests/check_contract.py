@@ -289,6 +289,39 @@ def check_luci_validation() -> None:
             fail(f"LuCI does not validate {purpose}")
 
 
+def check_luci_compat() -> None:
+    compat = OPENWRT / "luci-app-smartdns-rs-compat"
+    lua_root = compat / "root/usr/lib/lua/luci"
+    lua = load(lua_root / "model/cbi/smartdns/smartdns.lua")
+    # Include the names from the fixed JS tables, as well as literal options.
+    js = load(LUCI)
+    options = set(re.findall(
+        r"(?:taboption|option)\([^\n]*?form\.\w+,\s*'([\w-]+)'", js
+    ))
+    options.update(re.findall(r"\[\s*'(rr_ttl\w*|whitelist_ip|blacklist_ip|ignore_ip|bogus_nxdomain)'", js))
+    options.update("seconddns_" + name for name in re.findall(
+        r"\[\s*'(no_speed_check|no_rule_\w+|no_dualstack_selection|no_cache|force_\w+_soa)'", js
+    ))
+    options = {name for name in options if not name.startswith("_") and name != "seconddns_"}
+    lua_options = set(re.findall(r':(?:taboption|option)\([^\n]*?\w+,\s*"([\w-]+)"', lua))
+    if missing := sorted(options - lua_options):
+        fail("Lua LuCI is missing JS configuration options: " + ", ".join(missing))
+
+    translations = po_entries(compat / "po/zh_Hans/smartdns.po")
+    for path in lua_root.rglob("*"):
+        if path.suffix not in {".lua", ".htm"}:
+            continue
+        source = load(path)
+        labels = re.findall(r'(?:translate|_)\("([^"\n]+)"\)', source)
+        labels.extend(re.findall(r"<%:([^%]+)%>", source))
+        if missing := sorted(label for label in labels if not translations.get(label)):
+            fail("Lua LuCI translations are missing: " + ", ".join(missing))
+
+    for relative in ("usr/libexec/smartdns-rs-call", "usr/share/rpcd/acl.d/luci-app-smartdns-rs.json"):
+        if load(compat / "root" / relative) != load(OPENWRT / "luci-app-smartdns-rs/root" / relative):
+            fail("Lua/JS shared helper or ACL has diverged: " + relative)
+
+
 def check_features() -> None:
     cargo = load(ROOT / "Cargo.toml")
     package = load(CORE / "Makefile")
@@ -307,8 +340,6 @@ def check_features() -> None:
             f"Cargo-only={sorted(cargo_features - package_features)}, "
             f"package-only={sorted(package_features - cargo_features)}"
         )
-    if "CARGO_PKG_VARS+=SMARTDNS_OPENWRT=1" not in package:
-        fail("OpenWrt package does not select the SDK-only build.rs path")
     rust_include = "include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk"
     sse_condition = "ifeq ($(RUSTC_TARGET_ARCH),i586-unknown-linux-musl)"
     if (
@@ -317,8 +348,14 @@ def check_features() -> None:
         or "CARGO_RUSTFLAGS+=-Ctarget-feature=+sse,+sse2" not in package
     ):
         fail("OpenWrt package does not enable SSE/SSE2 after resolving the Rust target")
-    if 'env::var_os("SMARTDNS_OPENWRT")' not in build_script:
-        fail("build.rs does not implement the OpenWrt SDK-only path")
+    if "cc::Build" in build_script or "bindgen::" in build_script:
+        fail("project build.rs must not compile a C implementation")
+    for directory in (ROOT / "src", ROOT / "include"):
+        if any(directory.rglob("*.c")):
+            fail("the project implementation must remain Rust-only")
+    for required in ("VARIANT:=headless", "VARIANT:=webui", "ifeq ($(BUILD_VARIANT),webui)", "RUST_PKG_FEATURES+=webui"):
+        if required not in package:
+            fail("missing independent OpenWrt build variant: " + required)
 
 
 def check_runtime_safety(init: str) -> None:
@@ -338,6 +375,7 @@ def main() -> None:
     check_luci_options(init)
     check_translations()
     check_luci_validation()
+    check_luci_compat()
     check_features()
     check_runtime_safety(init)
     print("OpenWrt Rust/UCI/LuCI contract: OK")

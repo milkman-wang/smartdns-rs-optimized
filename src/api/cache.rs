@@ -20,7 +20,7 @@ pub fn routes() -> StatefulRouter {
 #[get("/caches", tag = "Caches", operation_id = "list_caches")]
 async fn caches(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<CachedQueryRecord>> {
     let caches = if let Some(c) = state.app.cache().await {
-        c.cached_records().await
+        c.cached_records()
     } else {
         vec![]
     };
@@ -30,7 +30,7 @@ async fn caches(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Ca
 #[post("/caches/flush", tag = "Caches", operation_id = "flush_caches")]
 async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
     if let Some(c) = state.app.cache().await {
-        c.clear().await;
+        c.clear();
     }
     log::info!("flushed cache");
     StatusCode::NO_CONTENT

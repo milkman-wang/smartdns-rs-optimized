@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build local smoke-test IPKs around the upstream static ARM64 binary.
+"""Package a supplied ARM64 binary and this checkout's OpenWrt integration.
 
-This helper is intentionally separate from the OpenWrt SDK build.  It allows a
-Windows checkout to produce installable packages for a first router test, but
-the binary itself is the verified upstream v0.13.1 release and therefore does
-not contain uncommitted Rust changes from this checkout.
+This helper packages but does not compile binaries. Pass --binary for a local
+cross-build. Without it, the headless smoke-test path downloads the verified
+upstream v0.13.1 binary, which does not include this checkout's Rust changes.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import urllib.request
 
 
 VERSION = "0.13.1"
-RELEASE = "5"
+RELEASE = "24"
 ARCH = "aarch64_cortex-a53"
 ARCHIVE_NAME = f"smartdns-aarch64-unknown-linux-musl-v{VERSION}.tar.gz"
 ARCHIVE_URL = (
@@ -278,9 +277,13 @@ def package(
         shutil.rmtree(control_root, ignore_errors=True)
 
 
-def build(repo: Path, output: Path, cache: Path) -> list[Path]:
+def build(repo: Path, output: Path, cache: Path, binary: Path | None = None, variant: str = "headless") -> list[Path]:
     output.mkdir(parents=True, exist_ok=True)
-    binary = download_binary(cache)
+    if variant == "webui" and binary is None:
+        raise ValueError("WebUI packaging requires --binary built with the webui Cargo feature")
+    supplied_binary = binary is not None
+    binary = binary if supplied_binary else download_binary(cache)
+    core_name = "smartdns-rs-webui" if variant == "webui" else "smartdns-rs"
     built: list[Path] = []
 
     with tempfile.TemporaryDirectory(prefix="smartdns-data-") as temporary:
@@ -295,14 +298,19 @@ def build(repo: Path, output: Path, cache: Path) -> list[Path]:
                     "etc/uci-defaults/90-smartdns-rs",
                 } else 0o644
                 copy_file(source, root, "/" + relative, mode)
+        if variant == "webui":
+            configuration = root / "etc/config/smartdns"
+            content = configuration.read_text(encoding="utf-8")
+            content = content.replace("\toption port '6053'", "\toption port '6053'\n\toption webui_enable '1'\n\toption webui_bind '0.0.0.0:6080'")
+            configuration.write_text(content, encoding="utf-8", newline="\n")
         built.append(
             package(
                 output,
-                "smartdns-rs",
+                core_name,
                 f"{VERSION}-{RELEASE}",
                 ARCH,
                 "ca-bundle",
-                "SmartDNS-rs DNS server (upstream prebuilt binary smoke-test package).",
+                f"SmartDNS-rs {variant} ({'supplied binary' if supplied_binary else 'upstream prebuilt smoke test'}).",
                 root,
                 conffiles=[
                     "/etc/config/smartdns",
@@ -317,8 +325,8 @@ def build(repo: Path, output: Path, cache: Path) -> list[Path]:
                     "etc/init.d/smartdns",
                     "etc/uci-defaults/90-smartdns-rs",
                 },
-                provides="smartdns",
-                conflicts="smartdns",
+                provides="smartdns, smartdns-rs" if variant == "webui" else "smartdns",
+                conflicts="smartdns, smartdns-rs" if variant == "webui" else "smartdns, smartdns-rs-webui",
                 scripts={"postinst": DEFAULT_POSTINST, "prerm": DEFAULT_PRERM},
             )
         )
@@ -373,13 +381,61 @@ def build(repo: Path, output: Path, cache: Path) -> list[Path]:
     return built
 
 
+def build_luci_compat(repo: Path, output: Path) -> list[Path]:
+    """Package the Lua UI from this checkout, without downloading a DNS binary."""
+    output.mkdir(parents=True, exist_ok=True)
+    source = repo / "contrib/openwrt/luci-app-smartdns-rs-compat"
+    built = []
+    executables = {
+        "usr/libexec/smartdns-rs-call",
+        "etc/uci-defaults/90-luci-smartdns-rs-compat",
+    }
+    with tempfile.TemporaryDirectory(prefix="smartdns-lua-") as temporary:
+        root = Path(temporary)
+        for path in (source / "root").rglob("*"):
+            if path.is_file():
+                relative = path.relative_to(source / "root").as_posix()
+                copy_file(path, root, "/" + relative, 0o755 if relative in executables else 0o644)
+        built.append(package(
+            output, "luci-app-smartdns-rs-compat", f"{VERSION}-{RELEASE}", "all",
+            "luci-base, smartdns-rs", "Lua LuCI support for SmartDNS-rs.", root,
+            data_executables=executables,
+            conflicts="luci-app-smartdns, luci-app-smartdns-rs",
+            scripts={
+                "postinst": DEFAULT_POSTINST
+                + '\n[ -n "$IPKG_INSTROOT" ] || rm -f /tmp/luci-indexcache\nexit 0\n',
+                "prerm": DEFAULT_PRERM,
+            },
+        ))
+    with tempfile.TemporaryDirectory(prefix="smartdns-lua-i18n-") as temporary:
+        root = Path(temporary)
+        destination = root / "usr/lib/lua/luci/i18n/smartdns.zh-cn.lmo"
+        destination.parent.mkdir(parents=True)
+        compile_lmo(source / "po/zh_Hans/smartdns.po", destination)
+        built.append(package(
+            output, "luci-i18n-smartdns-rs-compat-zh-cn", f"{VERSION}-{RELEASE}", "all",
+            "luci-app-smartdns-rs-compat", "Chinese translation for the Lua LuCI UI.", root,
+        ))
+    return built
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[3])
     parser.add_argument("--output", type=Path, default=Path("dist/openwrt/aarch64_cortex-a53"))
     parser.add_argument("--cache", type=Path, default=Path("dist/openwrt/cache"))
+    parser.add_argument("--binary", type=Path, help="Use a locally built target binary")
+    parser.add_argument("--variant", choices=["headless", "webui"], default="headless")
+    parser.add_argument("--luci-compat-only", action="store_true",
+                        help="Package the current Lua UI and translation only; no prebuilt DNS binary")
     args = parser.parse_args()
-    for artifact in build(args.repo.resolve(), args.output.resolve(), args.cache.resolve()):
+    if args.luci_compat_only:
+        artifacts = build_luci_compat(args.repo.resolve(), args.output.resolve())
+    else:
+        if args.variant == "webui" and args.binary is None:
+            parser.error("--variant webui requires --binary built with the webui feature")
+        artifacts = build(args.repo.resolve(), args.output.resolve(), args.cache.resolve(), args.binary.resolve() if args.binary else None, args.variant)
+    for artifact in artifacts:
         print(f"Built {artifact} ({artifact.stat().st_size} bytes)")
 
 

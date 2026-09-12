@@ -7,6 +7,7 @@ pub enum SpeedCheckMode {
     None,
     Ping,
     Tcp(u16),
+    TcpSyn(u16),
     Http(u16),
     Https(u16),
 }
@@ -22,6 +23,7 @@ impl SpeedCheckMode {
             None => return Default::default(),
             Ping => PingAddr::Icmp(ip_addr),
             Tcp(port) => PingAddr::Tcp(SocketAddr::new(ip_addr, port)),
+            TcpSyn(port) => PingAddr::TcpSyn(SocketAddr::new(ip_addr, port)),
             Http(port) => PingAddr::Http(SocketAddr::new(ip_addr, port)),
             Https(port) => PingAddr::Https(SocketAddr::new(ip_addr, port)),
         })
@@ -42,6 +44,7 @@ impl std::fmt::Debug for SpeedCheckMode {
             None => write!(f, "None"),
             Ping => write!(f, "ICMP"),
             Tcp(port) => write!(f, "TCP:{port}"),
+            TcpSyn(port) => write!(f, "TCP-SYN:{port}"),
             Http(port) => {
                 if *port == 80 {
                     write!(f, "HTTP")

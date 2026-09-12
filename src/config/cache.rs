@@ -10,7 +10,13 @@ pub struct CacheConfig {
     /// cache-size [number]
     ///   0: for no cache
     /// ```
-    pub size: Option<usize>,
+    pub size: Option<isize>,
+
+    /// Cache memory budget; zero leaves the entry-count limit in control.
+    pub memory_size: Option<byte_unit::Byte>,
+
+    /// Interval between proactive refreshes of stale positive records.
+    pub expired_prefetch_time: Option<u64>,
 
     /// enable persist cache when restart
     pub persist: Option<bool>,

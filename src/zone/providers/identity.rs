@@ -18,14 +18,9 @@ impl IdentityZoneProvider {
     }
 }
 
-#[async_trait::async_trait]
 impl ZoneProvider for IdentityZoneProvider {
-    async fn lookup(
-        &self,
-        ctx: &DnsContext,
-        req: &DnsRequest,
-    ) -> Result<Option<DnsResponse>, DnsError> {
-        let query = req.query().original().to_owned();
+    fn lookup(&self, ctx: &DnsContext, req: &DnsRequest) -> Result<Option<DnsResponse>, DnsError> {
+        let query = req.query().original();
 
         if query.query_type() != RecordType::TXT {
             return Ok(None);
@@ -40,6 +35,7 @@ impl ZoneProvider for IdentityZoneProvider {
             return Ok(None);
         };
 
+        let query = query.clone();
         let client_ip = normalize_client_ip(req.src().ip());
         let server_name = trim_fqdn_dot(ctx.cfg().server_name().to_string());
         let client_mac = || {

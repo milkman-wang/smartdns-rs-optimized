@@ -26,7 +26,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsZoneMiddle
         req: &DnsRequest,
         next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
     ) -> Result<DnsResponse, DnsError> {
-        if let Some(response) = self.manager.lookup(ctx, req).await? {
+        if let Some(response) = crate::zone::ddr_lookup(ctx, req) {
+            return Ok(response);
+        }
+        if let Some(response) = self.manager.lookup(ctx, req)? {
             return Ok(response);
         }
 
@@ -61,6 +64,35 @@ mod tests {
         message.add_query(query);
         let req = DnsRequest::new(message, src, Protocol::Udp);
         mw.search(&req, &Default::default()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_c_compat_txt_records_and_cache_options() {
+        let cfg = RuntimeConfig::builder()
+            .with("cache-size -1")
+            .with("cache-mem-size 4MiB")
+            .with("serve-expired-prefetch-time 120")
+            .with("txt-record /example/\"hello world\" \"second chunk\"")
+            .with("txt-record /example/another-record")
+            .build()
+            .unwrap();
+        assert!(cfg.cache_size() >= 512);
+        assert_eq!(cfg.cache.memory_size.unwrap().as_u64(), 4 * 1024 * 1024);
+        assert_eq!(cfg.cache.expired_prefetch_time, Some(120));
+        let handler = DnsMockMiddleware::mock(DnsZoneMiddleware::new()).build(cfg);
+        let response = handler.lookup("example.", RecordType::TXT).await.unwrap();
+        assert_eq!(response.answers().len(), 2);
+        assert_eq!(
+            response.answers()[0].data(),
+            &RData::TXT(rr::rdata::TXT::new(vec![
+                "hello world".into(),
+                "second chunk".into()
+            ]))
+        );
+        assert_eq!(
+            response.answers()[1].data(),
+            &RData::TXT(rr::rdata::TXT::new(vec!["another-record".into()]))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

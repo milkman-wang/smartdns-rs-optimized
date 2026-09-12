@@ -2,14 +2,37 @@
 
 This directory contains a scenario-based performance suite that targets specific runtime paths.
 
+The [performance goal report](performance-goal-20260912.md) compares the latest
+headless and WebUI builds against C Release48.4 and their previous optimized
+builds, with repeated throughput, CPU cost, latency, and router feature checks.
+
+The [2026-09-12 optimization report](optimization-20260912.md) compares the
+finished optimization with both pre-optimization variants, the previous Rust
+version, and C, including CPU cost and live WebUI validation.
+
+The [2026-09-12 C and Rust comparison](c-rust-20260912.md) measures C Release48.4,
+the previous deployed Rust version, and the current headless/WebUI variants on
+the same router. It includes raw results and a reproducible isolated runner.
+
 ## Scenarios and covered functionality
+
+The [encoded response, PGO, and physical LAN report](wire-pgo-20260912.md)
+compares the next optimization with the previous final build, including CPU
+target screening, ARM PMU counters, load-generator capacity, and process affinity.
+Its final packages use PGO; ordinary release builds receive the source changes
+without automatically applying the trained profile.
+
+The [single-core efficiency and OxiDNS implementation study](router-efficiency-20260912.md)
+records the next round of measured changes, including 96 final trials, bounded
+TTL response reuse, cold-query memory samples, and latency tradeoffs. Its
+[isolated runner](run_router_efficiency.sh) verifies upstream query counts.
 
 | Scenario | Covered functionality |
 |---|---|
 | `static_address_rule` | `AddressMiddleware` static response path, local UDP server path |
 | `hosts_file_lookup` | `DnsHostsMiddleware` hosts-file lookup path, hosts file mtime/signature cache |
 | `dnsmasq_lease_lookup` | `DnsmasqMiddleware` path, `LanClientStore` lease-file mtime cache |
-| `dns_cache_hit_path` | `DnsCacheMiddleware` insert/get + cache-hit path + bounded `DnsHandle` queue |
+| `dns_cache_hit_path` | `DnsCacheMiddleware` insert/get + cache-hit path + direct `DnsHandle` dispatch |
 | `prefetch_scheduler_active` | cache prefetch scheduling/index path with large cached domain set |
 
 ## Local run

@@ -16,6 +16,9 @@ SmartDNS-rs 🐋 is a local DNS server imspired by [C SmartDNS](https://github.c
 
 ## Features
 
+See [C SmartDNS feature compatibility](docs/C_FEATURE_COMPATIBILITY.md) for
+configuration examples, plugin support and platform requirements.
+
 - **Multiple upstream DNS servers**
 
   Supports configuring multiple upstream DNS servers and query at the same  time.the query will not be affected, Even if there is a DNS server  exception.

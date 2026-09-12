@@ -1,0 +1,40 @@
+#!/bin/sh
+
+action="$1"
+log_file="$(uci -q get smartdns.@smartdns[0].log_file)"
+[ -n "$log_file" ] || log_file=/var/log/smartdns/smartdns.log
+
+case "$action" in
+	tail)
+		[ -f "$log_file" ] || { echo "Log file does not exist."; exit 0; }
+		;;
+	clear_log)
+		[ -e "$log_file" ] || exit 0
+		;;
+	*)
+		echo "Unsupported action."
+		exit 1
+		;;
+esac
+
+resolved="$(readlink -f "$log_file" 2>/dev/null)" || {
+	echo "Cannot resolve the configured log path."
+	exit 1
+}
+# OpenWrt normally keeps /var on tmpfs.  Some derivatives expose that as a
+# literal /var directory while QWRT uses /var -> /tmp, so validate both the
+# configured namespace and the resolved tmpfs location.
+case "$log_file" in
+	/var/log/smartdns/*) ;;
+	*) echo "The configured log path is not allowed in LuCI."; exit 1 ;;
+esac
+case "$resolved" in
+	/var/log/smartdns/*|/tmp/log/smartdns/*) ;;
+	*) echo "The configured log path is not allowed in LuCI."; exit 1 ;;
+esac
+[ -f "$resolved" ] || { echo "The configured log is not a regular file."; exit 1; }
+
+case "$action" in
+	tail) tail -n 3000 "$resolved" ;;
+	clear_log) : > "$resolved" ;;
+esac

@@ -11,6 +11,9 @@ pub struct AuditConfig {
     ///
     /// enable or disable audit.
     pub enable: Option<bool>,
+    pub soa: Option<bool>,
+    pub console: Option<bool>,
+    pub syslog: Option<bool>,
 
     /// audit file
     ///

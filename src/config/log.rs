@@ -9,6 +9,7 @@ use crate::{infra::file_mode::FileMode, third_ext::serde_opt_str};
 pub struct LogConfig {
     /// enable output log to console
     pub console: Option<bool>,
+    pub syslog: Option<bool>,
 
     /// set log level
     ///

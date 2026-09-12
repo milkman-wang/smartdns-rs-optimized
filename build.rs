@@ -5,65 +5,6 @@ use std::io::Write;
 
 use std::{env, path::Path};
 
-#[cfg(target_os = "linux")]
-fn build_nftset() -> anyhow::Result<()> {
-    let target = env::var("TARGET")?;
-    let use_openwrt_toolchain = env::var_os("SMARTDNS_OPENWRT").is_some();
-
-    if !target.contains("linux") {
-        return Ok(());
-    }
-
-    let mut build = cc::Build::new();
-    build.file("include/nftset.c").warnings(false);
-
-    if target.ends_with("-musl") && !use_openwrt_toolchain {
-        let target_dir = env::var_os("OUT_DIR").unwrap();
-        let musl_root = Path::new(&target_dir);
-        let target = target.replace("unknown-linux", "linux");
-        let include_dir = musl_root.join(format!("{target}-native")).join("include");
-        if !musl_root.exists() {
-            std::fs::create_dir_all(musl_root)?;
-        }
-
-        let file = musl_root.join(format!("{target}-native.tgz"));
-        if !file.exists() {
-            std::process::Command::new("curl")
-                .args(["-OL", &format!("https://musl.cc/{target}-native.tgz")])
-                .current_dir(musl_root)
-                .output()
-                .unwrap_or_else(|_| panic!("download https://musl.cc/{target}-native.tgz failed"));
-        }
-
-        if !include_dir.exists() {
-            std::process::Command::new("tar")
-                .args(["-xzf", &format!("{target}-native.tgz")])
-                .current_dir(musl_root)
-                .output()
-                .unwrap_or_else(|_| panic!("untar {target}-native.tgz failed"));
-        }
-
-        build.include(include_dir.as_os_str()); // https://musl.cc/x86_64-linux-musl-native.tgz
-    }
-
-    build.compile("nftset");
-
-    // OpenWrt already supplies the target compiler, sysroot and headers. Its
-    // reproducible package build also uses the checked-in bindings instead of
-    // requiring a host libclang or modifying the extracted source tree.
-    if !use_openwrt_toolchain {
-        bindgen::Builder::default()
-            .header("include/nftset.h")
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-            .generate()
-            .expect("Unable to generate bindings")
-            .write_to_file("src/ffi/nftset_sys.rs")
-            .unwrap();
-    }
-
-    Ok(())
-}
-
 fn download<P: AsRef<Path> + Copy>(url: &str, file_path: P) -> bool {
     use reqwest::blocking as http;
     if Path::exists(file_path.as_ref()) {
@@ -141,9 +82,6 @@ fn create_build_time_vars() -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all("./logs")?;
-
-    #[cfg(target_os = "linux")]
-    build_nftset()?;
 
     download_resources()?;
 

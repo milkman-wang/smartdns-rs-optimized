@@ -27,7 +27,7 @@ mod tests {
                 ConfigForDomain {
                     domain: Domain::Name("www.example.com".parse().unwrap()),
                     config: ConfigForIP::V4(NFTsetConfig {
-                        family: "inet",
+                        family: "inet".to_string(),
                         table: "tab".to_string(),
                         name: "dns4".to_string()
                     })
@@ -42,7 +42,7 @@ mod tests {
                 ConfigForDomain {
                     domain: Domain::Set("abc".to_string()),
                     config: ConfigForIP::V6(NFTsetConfig {
-                        family: "inet",
+                        family: "inet".to_string(),
                         table: "tab".to_string(),
                         name: "dns4".to_string()
                     })
@@ -57,7 +57,7 @@ mod tests {
                 ConfigForDomain {
                     domain: Domain::Name(WildcardName::Default(Name::root())),
                     config: ConfigForIP::V6(NFTsetConfig {
-                        family: "inet",
+                        family: "inet".to_string(),
                         table: "tab".to_string(),
                         name: "dns4".to_string()
                     })

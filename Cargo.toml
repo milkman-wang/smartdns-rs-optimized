@@ -27,7 +27,10 @@ default = ["common", "self-update" ]
 
 homebrew = [ "common" ]
 
-common = ["resolve-cli", "dns-over-tls", "dns-over-https", "dns-over-quic", "dns-over-h3", "mdns", "dnssec", "service", "nft", "nom-recipes-all", "swagger-ui-cdn", "http_client", "serde" ]
+common = ["resolve-cli", "dns-over-tls", "dns-over-https", "dns-over-quic", "dns-over-h3", "mdns", "dnssec", "service", "nft", "nom-recipes-all", "http_client", "serde" ]
+
+# Optional Rust management UI. Headless builds do not compile its routes/assets.
+webui = []
 
 # OpenWrt keeps the DNS protocol and firewall integrations while excluding
 # desktop-only service management, the resolve CLI, and self-updating code.
@@ -202,6 +205,12 @@ webpki-roots = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"]  }
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+pkcs8 = { version = "0.10.2", features = ["std", "pem", "encryption", "getrandom"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["ring", "pem"] }
+x509-parser = "0.18.1"
+time = "0.3"
 
 lru = { version = "0.14", default-features = false }
 # time = "0.3"
@@ -237,7 +246,11 @@ console = { version = "0.15.8", optional = true }
 rangemap = "1.5.1"
 mac-addr = "0.3.0"
 
+[target.'cfg(all(target_env = "musl", target_pointer_width = "64"))'.dependencies]
+mimalloc = "0.1.52"
+
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 uzers = { version = "0.12", default-features = false }
 caps = "0.5.5"
 self_update = { version = "0.42.0", default-features = false, features=["archive-tar", "compression-flate2"], optional = true }
@@ -271,9 +284,6 @@ chrono = "0.4.38"
 anyhow = "1.0"
 
 
-[target.'cfg(target_os = "linux")'.build-dependencies]
-cc = "1.2"
-bindgen = "0.72"
 
 
 # Dev-dependencies are not used when compiling a package for building, but are used for compiling tests, examples, and benchmarks.

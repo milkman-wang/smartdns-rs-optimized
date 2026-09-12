@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Lua LuCI uses ucitrack when applying UCI changes.
+uci -q batch <<'EOF'
+delete ucitrack.@smartdns[-1]
+add ucitrack smartdns
+set ucitrack.@smartdns[-1].init=smartdns
+commit ucitrack
+EOF
+
+exit 0

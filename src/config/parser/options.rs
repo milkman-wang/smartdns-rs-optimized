@@ -63,9 +63,18 @@ pub fn unkown_value(input: &str) -> IResult<&str, &str> {
 }
 
 pub fn unkown_options(input: &str) -> IResult<&str, (&str, Option<&str>)> {
-    let key = any_name;
-    let value = unkown_value;
-    pair(key, opt(value)).parse(input)
+    let (input, key) = any_name(input)?;
+    let (input, value) = if key.eq_ignore_ascii_case("nftset") || key.eq_ignore_ascii_case("ipset")
+    {
+        opt(preceded(
+            alt((tag("="), recognize(pair(opt(char(':')), space1)))),
+            is_not(" \t\r\n"),
+        ))
+        .parse(input)?
+    } else {
+        opt(unkown_value).parse(input)?
+    };
+    Ok((input, (key, value)))
 }
 
 pub fn parse(input: &str) -> IResult<&str, Options<'_>> {

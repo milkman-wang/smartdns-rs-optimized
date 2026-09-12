@@ -91,6 +91,11 @@ impl LookupError {
     }
 
     pub fn as_no_records_response(&self, query: &Query) -> Option<DnsResponse> {
+        if let Self::ResponseCode(code) = self {
+            let mut response = DnsResponse::new_with_max_ttl(query.clone(), []);
+            response.set_response_code(*code);
+            return Some(response);
+        }
         if let Self::Proto(err) = self
             && let ProtoErrorKind::NoRecordsFound(NoRecords {
                 soa, response_code, ..

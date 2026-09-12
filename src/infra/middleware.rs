@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::BoxFuture;
 use std::result::Result;
 
 #[async_trait::async_trait]
@@ -64,9 +64,9 @@ impl<'a, TCtx: Send, TReq: Sync, TRes, TErr> Next<'a, TCtx, TReq, TRes, TErr> {
     pub fn run(mut self, ctx: &'a mut TCtx, req: &'a TReq) -> BoxFuture<'a, Result<TRes, TErr>> {
         if let Some((current, rest)) = self.middlewares.split_first() {
             self.middlewares = rest;
-            current.handle(ctx, req, self).boxed()
+            current.handle(ctx, req, self)
         } else {
-            self.default.handle(ctx, req).boxed()
+            self.default.handle(ctx, req)
         }
     }
 }

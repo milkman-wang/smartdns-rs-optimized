@@ -7,11 +7,13 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+mod tcp_syn;
 
 pub async fn ping(dest: PingAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
     match dest {
         PingAddr::Icmp(addr) => icmp::ping(addr, opts).await,
         PingAddr::Tcp(addr) => tcp::ping(addr, opts).await,
+        PingAddr::TcpSyn(addr) => tcp_syn::ping(addr, opts).await,
         PingAddr::Http(addr) => http::ping(addr, opts).await,
         PingAddr::Https(addr) => https::ping(addr, opts).await,
     }
@@ -27,6 +29,7 @@ pub async fn ping_batch(
         outs.push(match dest {
             PingAddr::Icmp(addr) => icmp::ping(*addr, opts).await,
             PingAddr::Tcp(addr) => tcp::ping(*addr, opts).await,
+            PingAddr::TcpSyn(addr) => tcp_syn::ping(*addr, opts).await,
             PingAddr::Http(addr) => http::ping(*addr, opts).await,
             PingAddr::Https(addr) => https::ping(*addr, opts).await,
         })
@@ -46,6 +49,7 @@ pub async fn ping_fastest(
     let ping_tasks = dests.iter().map(|dst| match dst {
         PingAddr::Icmp(addr) => icmp::ping(*addr, opts).boxed(),
         PingAddr::Tcp(addr) => tcp::ping(*addr, opts).boxed(),
+        PingAddr::TcpSyn(addr) => tcp_syn::ping(*addr, opts).boxed(),
         PingAddr::Http(addr) => http::ping(*addr, opts).boxed(),
         PingAddr::Https(addr) => https::ping(*addr, opts).boxed(),
     });
@@ -114,6 +118,7 @@ impl Default for PingOptions {
 pub enum PingAddr {
     Icmp(IpAddr),
     Tcp(SocketAddr),
+    TcpSyn(SocketAddr),
     Http(SocketAddr),
     Https(SocketAddr),
 }
@@ -123,6 +128,7 @@ impl PingAddr {
         match self {
             PingAddr::Icmp(ip) => ip,
             PingAddr::Tcp(addr) => addr.ip(),
+            PingAddr::TcpSyn(addr) => addr.ip(),
             PingAddr::Http(addr) => addr.ip(),
             PingAddr::Https(addr) => addr.ip(),
         }
@@ -150,6 +156,7 @@ impl Display for PingAddr {
         match self {
             PingAddr::Icmp(addr) => write!(f, "icmp://{addr}"),
             PingAddr::Tcp(addr) => write!(f, "tcp://{addr}"),
+            PingAddr::TcpSyn(addr) => write!(f, "tcp-syn://{addr}"),
             PingAddr::Http(addr) => write!(f, "http://{addr}"),
             PingAddr::Https(addr) => write!(f, "https://{addr}"),
         }
@@ -170,6 +177,9 @@ impl TryFrom<&str> for PingAddr {
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         let s = s.trim();
+        if let Some(addr) = s.strip_prefix("tcp-syn://") {
+            return Ok(Self::TcpSyn(SocketAddr::from_str(addr)?));
+        }
         if let Some(sock_addr) = s.strip_prefix("tcp://") {
             let sock_addr = SocketAddr::from_str(sock_addr)?;
             Ok(Self::Tcp(sock_addr))

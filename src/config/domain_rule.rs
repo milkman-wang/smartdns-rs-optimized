@@ -14,6 +14,8 @@ pub struct DomainRule {
 
     pub srv: Option<SRV>,
 
+    pub txt: Option<Vec<TXT>>,
+
     pub https: Option<HttpsRecordRule>,
 
     /// The mode of speed checking.
@@ -26,6 +28,7 @@ pub struct DomainRule {
     pub no_cache: Option<bool>,
     pub no_serve_expired: Option<bool>,
     pub nftset: Option<Vec<ConfigForIP<NFTsetConfig>>>,
+    pub ipset: Option<Vec<ConfigForIP<KernelIpSet>>>,
 
     pub rr_ttl: Option<u64>,
     pub rr_ttl_min: Option<u64>,
@@ -36,6 +39,9 @@ pub struct DomainRule {
 
 impl std::ops::AddAssign for DomainRule {
     fn add_assign(&mut self, rhs: Self) {
+        if let Some(txt) = rhs.txt {
+            self.txt.get_or_insert_with(Vec::new).extend(txt);
+        }
         if rhs.nameserver.is_some() {
             self.nameserver = rhs.nameserver;
         }
@@ -62,6 +68,7 @@ impl std::ops::AddAssign for DomainRule {
         if rhs.nftset.is_some() {
             self.nftset = rhs.nftset;
         }
+        self.ipset = rhs.ipset.or(self.ipset.take());
 
         if rhs.rr_ttl.is_some() {
             self.rr_ttl = rhs.rr_ttl;

@@ -1,0 +1,26 @@
+{
+	"luci-app-smartdns-rs": {
+		"description": "Grant access to the SmartDNS-rs LuCI application",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/etc/smartdns/*": [ "read" ],
+				"/usr/libexec/smartdns-rs-call tail": [ "exec" ]
+			},
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"uci": [ "dhcp", "network", "smartdns" ]
+		},
+		"write": {
+			"file": {
+				"/etc/smartdns/*": [ "write" ],
+				"/etc/init.d/smartdns restart": [ "exec" ],
+				"/etc/init.d/smartdns updatefiles": [ "exec" ],
+				"/etc/init.d/smartdns check": [ "exec" ],
+				"/usr/libexec/smartdns-rs-call clear_log": [ "exec" ]
+			},
+			"uci": [ "smartdns" ]
+		}
+	}
+}

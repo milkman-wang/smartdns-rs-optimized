@@ -10,7 +10,7 @@ use crate::{
     infra::file_mode::FileMode,
     libdns::proto::rr::{
         Name, RecordType,
-        rdata::{HTTPS, SRV},
+        rdata::{HTTPS, SRV, TXT},
     },
     log::Level,
     proxy::ProxyConfig,
@@ -78,6 +78,11 @@ pub struct Config {
     /// parallelism. An explicit count is a per-device tuning override.
     pub num_workers: Option<usize>,
 
+    /// Maximum concurrent foreground queries; zero disables the limit.
+    pub max_query_limit: Option<usize>,
+    pub webui_enable: Option<bool>,
+    pub webui_bind: Option<std::net::SocketAddr>,
+
     pub mdns_lookup: Option<bool>,
 
     /// whether resolv local hostname to ip address
@@ -109,6 +114,10 @@ pub struct Config {
     pub bind_cert_key_file: Option<PathBuf>,
     /// SSL Certificate key file password
     pub bind_cert_key_pass: Option<String>,
+    pub bind_cert_generate: CertificateGeneration,
+    pub bind_cert_san: Vec<String>,
+    pub bind_cert_validity_days: Option<u64>,
+    pub bind_cert_root_key_file: Option<PathBuf>,
 
     /// tcp connection idle timeout
     ///
@@ -208,9 +217,14 @@ pub struct Config {
     pub log: LogConfig,
 
     pub audit: AuditConfig,
+    pub debug_save_fail_packet: bool,
+    pub debug_save_fail_packet_dir: Option<PathBuf>,
 
     /// Support reading dnsmasq dhcp file to resolve local hostname
     pub dnsmasq_lease_file: Option<PathBuf>,
+
+    /// Native odhcpd hosts/lease output used for local IPv6 names.
+    pub odhcpd_lease_file: Option<PathBuf>,
 
     /// certificate file
     pub ca_file: Option<PathBuf>,
@@ -223,7 +237,7 @@ pub struct Config {
     /// The proxy server for upstream querying.
     pub proxy_servers: HashMap<String, ProxyConfig>,
 
-    pub nftsets: Vec<ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>>,
+    pub nftset_debug: bool,
 
     pub resolv_file: Option<PathBuf>,
     pub domain_set_providers: HashMap<String, Vec<DomainSetProvider>>,
@@ -268,18 +282,32 @@ impl<T: Sized + parser::NomParser> std::ops::Deref for ConfigForDomain<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConfigForIP<T: Sized + parser::NomParser> {
+    All(T),
     V4(T),
     V6(T),
     None,
+    NoneV4,
+    NoneV6,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NFTsetConfig {
-    pub family: &'static str,
+    pub family: String,
     pub table: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KernelIpSet(pub String);
+
+#[derive(Default, Debug)]
+pub struct NetworkSetOptions {
+    pub ipset_timeout: Option<bool>,
+    pub nftset_timeout: Option<bool>,
+    pub ipset_no_speed: Option<Vec<ConfigForIP<KernelIpSet>>>,
+    pub nftset_no_speed: Option<Vec<ConfigForIP<NFTsetConfig>>>,
 }
 
 pub type Options<'a> = Vec<(&'a str, Option<&'a str>)>;
@@ -294,6 +322,14 @@ pub struct SslConfig {
     pub certificate_key: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate_key_pass: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateGeneration {
+    #[default]
+    Auto,
+    Yes,
+    No,
 }
 
 #[allow(clippy::upper_case_acronyms)]

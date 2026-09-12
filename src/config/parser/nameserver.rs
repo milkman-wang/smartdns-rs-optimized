@@ -55,6 +55,21 @@ impl NomParser for NameServerInfo {
                     "blacklist-ip" => nameserver.blacklist_ip = true,
                     "whitelist-ip" => nameserver.whitelist_ip = true,
                     "check-edns" => nameserver.check_edns = true,
+                    "spki-pin" => {
+                        let pin = v.ok_or_else(|| {
+                            nom::Err::Failure(nom::error::Error::new(
+                                input,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })?;
+                        crate::rustls::parse_spki_pin(pin).map_err(|_| {
+                            nom::Err::Failure(nom::error::Error::new(
+                                input,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })?;
+                        nameserver.spki_pin = Some(pin.to_string());
+                    }
                     "b" | "bootstrap-dns" => nameserver.bootstrap_dns = true,
                     "set-mark" => match v {
                         Some(m) => nameserver.so_mark = u32::from_str_or_hex(m).ok(),

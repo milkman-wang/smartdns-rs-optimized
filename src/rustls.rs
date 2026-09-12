@@ -12,18 +12,21 @@ pub type PrivateKey = PrivateKeyDer<'static>;
 pub use rustls::server::ResolvesServerCert;
 use rustls::{ClientConfig, ServerConfig, sign::CertifiedKey};
 
-use crate::log::{info, warn};
+use crate::log::warn;
+mod certificate;
+pub use certificate::prepare_server_certificate;
 
 #[derive(Clone)]
 pub struct TlsClientConfigBundle {
     pub normal: Arc<ClientConfig>,
     pub sni_off: Arc<ClientConfig>,
     pub verify_off: Arc<ClientConfig>,
+    verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
 }
 
 impl TlsClientConfigBundle {
     pub fn new(ca_path: Option<PathBuf>, ca_file: Option<PathBuf>) -> Self {
-        let config = Self::create_tls_client_config(
+        let (config, verifier) = Self::create_tls_client_config(
             [ca_path, ca_file]
                 .into_iter()
                 .flatten()
@@ -50,10 +53,16 @@ impl TlsClientConfigBundle {
             normal: Arc::new(config),
             sni_off: Arc::new(sni_off),
             verify_off: Arc::new(verify_off),
+            verifier,
         }
     }
 
-    fn create_tls_client_config(paths: &[PathBuf]) -> ClientConfig {
+    fn create_tls_client_config(
+        paths: &[PathBuf],
+    ) -> (
+        ClientConfig,
+        Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    ) {
         use rustls::RootCertStore;
 
         let mut root_store = RootCertStore {
@@ -83,11 +92,150 @@ impl TlsClientConfigBundle {
             })
         }
 
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(root_store),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
+        let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
+        (config, verifier)
+    }
+
+    pub fn for_upstream(
+        &self,
+        verify: bool,
+        sni: bool,
+        pin: Option<&str>,
+    ) -> anyhow::Result<Arc<ClientConfig>> {
+        let mut config = if verify {
+            self.normal.as_ref()
+        } else {
+            self.verify_off.as_ref()
+        }
+        .clone();
+        config.enable_sni = sni;
+        if let Some(pin) = pin {
+            config
+                .dangerous()
+                .set_certificate_verifier(Arc::new(PinnedCertificateVerifier {
+                    pin: parse_spki_pin(pin)?,
+                    verifier: if verify {
+                        self.verifier.clone()
+                    } else {
+                        Arc::new(NoCertificateVerification)
+                    },
+                }));
+        }
+        Ok(Arc::new(config))
+    }
+}
+
+pub fn parse_spki_pin(pin: &str) -> anyhow::Result<[u8; 32]> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(pin)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("SPKI pin must encode a 32-byte SHA-256 digest"))
+}
+
+pub fn load_private_key(
+    path: &Path,
+    password: Option<&str>,
+) -> anyhow::Result<PrivateKeyDer<'static>> {
+    let bytes = fs::read(path)?;
+    if let Ok(key) = PrivateKeyDer::from_pem_slice(&bytes) {
+        return Ok(key);
+    }
+    if let Ok(key) = PrivateKeyDer::try_from(bytes.as_slice()) {
+        return Ok(key.clone_key());
+    }
+    let password = password.ok_or_else(|| {
+        anyhow::anyhow!(
+            "private key is encrypted or unsupported; set bind-cert-key-pass for encrypted PKCS#8"
+        )
+    })?;
+    let document;
+    let der = if bytes.starts_with(b"-----BEGIN") {
+        let (label, decoded) = pkcs8::SecretDocument::from_pem(std::str::from_utf8(&bytes)?)?;
+        anyhow::ensure!(
+            label == "ENCRYPTED PRIVATE KEY",
+            "expected an encrypted PKCS#8 key"
+        );
+        document = decoded;
+        document.as_bytes()
+    } else {
+        &bytes
+    };
+    let encrypted = pkcs8::EncryptedPrivateKeyInfo::try_from(der)?;
+    let decrypted = encrypted.decrypt(password)?;
+    PrivateKeyDer::try_from(decrypted.as_bytes().to_vec()).map_err(|error| anyhow::anyhow!(error))
+}
+
+#[derive(Debug)]
+struct PinnedCertificateVerifier {
+    pin: [u8; 32],
+    verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        certificate: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use sha2::{Digest, Sha256};
+        let (_, parsed) =
+            x509_parser::parse_x509_certificate(certificate.as_ref()).map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        let actual: [u8; 32] = Sha256::digest(parsed.public_key().raw).into();
+        if actual != self.pin {
+            return Err(rustls::Error::General("TLS SPKI pin mismatch".into()));
+        }
+        self.verifier
+            .verify_server_cert(certificate, intermediates, server_name, ocsp, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -196,8 +344,12 @@ pub struct TlsServerCertResolver {
 }
 
 impl TlsServerCertResolver {
-    pub fn new(cert_path: &Path, key_path: &Path) -> Result<Self, crate::Error> {
-        let certified_key = Self::load(cert_path, key_path)?;
+    pub fn new(
+        cert_path: &Path,
+        key_path: &Path,
+        password: Option<&str>,
+    ) -> Result<Self, crate::Error> {
+        let certified_key = Self::load(cert_path, key_path, password)?;
         Ok(TlsServerCertResolver {
             path: cert_path.to_path_buf(),
             private_key: key_path.to_path_buf(),
@@ -205,7 +357,11 @@ impl TlsServerCertResolver {
         })
     }
 
-    pub fn load(cert_path: &Path, key_path: &Path) -> Result<CertifiedKey, crate::Error> {
+    pub fn load(
+        cert_path: &Path,
+        key_path: &Path,
+        password: Option<&str>,
+    ) -> Result<CertifiedKey, crate::Error> {
         use crate::Error;
         use rustls::crypto::ring::default_provider;
 
@@ -230,53 +386,9 @@ impl TlsServerCertResolver {
                 )
             })?;
 
-        let key_extension = key_path.extension();
-
-        fn from_pem_file(key_path: &Path) -> Result<PrivateKeyDer<'static>, Error> {
-            let key_path = &key_path;
-            info!("loading TLS PKCS8 key from PEM: {}", key_path.display());
-            PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
-                Error::LoadCertificateKeyFailed(
-                    key_path.to_path_buf(),
-                    format!("failed to read key from {}: {e}", key_path.display()),
-                )
-            })
-        }
-
-        fn try_from(key_path: &Path) -> Result<PrivateKeyDer<'static>, Error> {
-            let key_path = &key_path;
-            info!("loading TLS PKCS8 key from DER: {}", key_path.display());
-
-            let buf = fs::read(key_path).map_err(|e| {
-                Error::LoadCertificateKeyFailed(
-                    key_path.to_path_buf(),
-                    format!("error reading key from file: {e}"),
-                )
-            })?;
-
-            PrivateKeyDer::try_from(buf).map_err(|e| {
-                Error::LoadCertificateKeyFailed(
-                    key_path.to_path_buf(),
-                    format!("error parsing key DER: {e}"),
-                )
-            })
-        }
-
-        let key = if key_extension.is_some_and(|ext| ext == "pem") {
-            from_pem_file(key_path)?
-        } else if key_extension.is_some_and(|ext| ext == "der") {
-            try_from(key_path)?
-        } else {
-            from_pem_file(key_path).or_else(|_| try_from(key_path)).map_err(|_| {
-                Error::LoadCertificateKeyFailed(
-                    key_path.to_path_buf(),
-                    format!(
-                        "unsupported private key file format (expected `.pem` or `.der` `.key` extension): {}",
-                        key_path.display()
-                    ),
-                )
-            })?
-        };
+        let key = load_private_key(key_path, password).map_err(|error| {
+            Error::LoadCertificateKeyFailed(key_path.to_path_buf(), error.to_string())
+        })?;
 
         let certified_key =
             CertifiedKey::from_der(cert_chain, key, &default_provider()).map_err(|err| {
@@ -296,5 +408,100 @@ impl ResolvesServerCert for TlsServerCertResolver {
         _client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         self.certified_key.read().ok().as_deref().cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn test_encrypted_private_key_password_is_used() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let der = key.serialize_der();
+        let info = pkcs8::PrivateKeyInfo::try_from(der.as_slice()).unwrap();
+        let params =
+            pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(10000, &[1; 16], &[2; 16])
+                .unwrap();
+        let encrypted = info.encrypt_with_params(params, "test password").unwrap();
+        let file =
+            std::env::temp_dir().join(format!("smartdns-encrypted-{}.pem", rand::random::<u64>()));
+        fs::write(
+            &file,
+            encrypted
+                .to_pem("ENCRYPTED PRIVATE KEY", pkcs8::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_private_key(&file, Some("test password"))
+                .unwrap()
+                .secret_der(),
+            der
+        );
+        assert!(load_private_key(&file, Some("wrong password")).is_err());
+        assert!(load_private_key(&file, None).is_err());
+        fs::write(&file, encrypted.as_bytes()).unwrap();
+        assert_eq!(
+            load_private_key(&file, Some("test password"))
+                .unwrap()
+                .secret_der(),
+            der
+        );
+        fs::remove_file(file).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_spki_pin_accepts_matching_key_and_rejects_other_key() {
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let file = std::env::temp_dir().join(format!("smartdns-pin-{}.pem", rand::random::<u64>()));
+        fs::write(&file, cert.pem()).unwrap();
+        let bundle = TlsClientConfigBundle::new(None, Some(file.clone()));
+        let (_, parsed) = x509_parser::parse_x509_certificate(cert.der().as_ref()).unwrap();
+        let pin = base64::engine::general_purpose::STANDARD
+            .encode(Sha256::digest(parsed.public_key().raw));
+        let mismatch = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        for (pin, verify, success) in [
+            (&pin, true, true),
+            (&mismatch, true, false),
+            (&mismatch, false, false),
+        ] {
+            let server = ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::try_from(signing_key.serialize_der()).unwrap(),
+            )
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                    .accept(stream)
+                    .await
+            });
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let client = tokio_rustls::TlsConnector::from(
+                bundle.for_upstream(verify, true, Some(pin)).unwrap(),
+            );
+            assert_eq!(
+                client
+                    .connect("localhost".try_into().unwrap(), stream)
+                    .await
+                    .is_ok(),
+                success
+            );
+            let _ = task.await;
+        }
+        fs::remove_file(file).unwrap();
     }
 }

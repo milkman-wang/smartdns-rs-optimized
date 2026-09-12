@@ -302,7 +302,16 @@ impl RuntimeConfig {
     /// dns cache size
     #[inline]
     pub fn cache_size(&self) -> usize {
-        self.cache.size.unwrap_or(512)
+        self.cache.size.unwrap_or(512).max(0) as usize
+    }
+
+    pub fn webui_enabled(&self) -> bool {
+        self.webui_enable.unwrap_or(cfg!(feature = "webui"))
+    }
+
+    pub fn webui_address(&self) -> std::net::SocketAddr {
+        self.webui_bind
+            .unwrap_or(std::net::SocketAddr::from(([127, 0, 0, 1], 6080)))
     }
 
     /// enable persist cache when restart
@@ -581,12 +590,18 @@ impl RuntimeConfig {
     }
 
     pub fn valid_nftsets(&self) -> Vec<&ConfigForIP<NFTsetConfig>> {
-        self.nftsets
-            .iter()
+        self.rule_groups
+            .values()
+            .flat_map(|group| &group.nftsets)
             .flat_map(|x| &x.config)
             .collect::<HashSet<_>>()
             .into_iter()
-            .filter(|x| !matches!(x, ConfigForIP::None))
+            .filter(|x| {
+                matches!(
+                    x,
+                    ConfigForIP::All(_) | ConfigForIP::V4(_) | ConfigForIP::V6(_)
+                )
+            })
             .collect()
     }
 
@@ -684,6 +699,18 @@ impl RuntimeConfigBuilder {
         let conf_dir = self.conf_dir;
         let mut cfg = self.config;
 
+        anyhow::ensure!(
+            cfg.cache.size.unwrap_or(0) >= -1,
+            "cache-size must be -1 or non-negative"
+        );
+        if cfg.cache.size == Some(-1) {
+            let mut system = sysinfo::System::new();
+            system.refresh_memory();
+            // Budget one percent of physical memory, at about 1 KiB per entry.
+            cfg.cache.size =
+                Some((system.total_memory() / 100 / 1024).clamp(512, 1_048_576) as isize);
+        }
+
         if !self.rule_group_stack.is_empty() {
             while let Some((name, group)) = self.rule_group_stack.pop() {
                 self.rule_groups.entry(name).or_default().merge(group);
@@ -760,7 +787,7 @@ impl RuntimeConfigBuilder {
                 &rule_group.cnames,
                 &rule_group.srv_records,
                 &rule_group.https_records,
-                &cfg.nftsets,
+                &rule_group.nftsets,
             );
             domain_rule_group_map.insert(group_name.to_string(), domain_rule_map);
         }
@@ -950,6 +977,14 @@ impl RuntimeConfigBuilder {
         match parser::parse_config(line) {
             Ok((_, Some(config_item))) => match config_item {
                 AuditEnable(v) => self.audit.enable = Some(v),
+                AuditSoa(v) => self.audit.soa = Some(v),
+                AuditConsole(v) => self.audit.console = Some(v),
+                AuditSyslog(v) => self.audit.syslog = Some(v),
+                LogSyslog(v) => self.log.syslog = Some(v),
+                DebugSaveFailPacket(v) => self.debug_save_fail_packet = v,
+                DebugSaveFailPacketDir(v) => {
+                    self.debug_save_fail_packet_dir = Some(self.resolve_filepath(v))
+                }
                 AuditFile(v) => self.audit.file = Some(v),
                 AuditFileMode(v) => self.audit.file_mode = Some(v),
                 AuditNum(v) => self.audit.num = Some(v),
@@ -957,13 +992,31 @@ impl RuntimeConfigBuilder {
                 BindCertFile(v) => self.bind_cert_file = Some(self.resolve_filepath(v)),
                 BindCertKeyFile(v) => self.bind_cert_key_file = Some(self.resolve_filepath(v)),
                 BindCertKeyPass(v) => self.bind_cert_key_pass = Some(v),
+                BindCertGenerate(v) => self.bind_cert_generate = v,
+                BindCertSan(v) => self.bind_cert_san.extend(v),
+                BindCertValidityDays(v) => self.bind_cert_validity_days = Some(v),
+                BindCertRootKeyFile(v) => {
+                    self.bind_cert_root_key_file = Some(self.resolve_filepath(v))
+                }
                 CacheFile(v) => self.cache.file = Some(v),
                 CachePersist(v) => self.cache.persist = Some(v),
                 CacheCheckpointTime(v) => self.cache.checkpoint_time = Some(v),
                 CNAME(v) => rule_group.cnames.push(v),
                 Dns64(v) => self.dns64_prefix = Some(v),
                 ExpandPtrFromAddress(v) => self.expand_ptr_from_address = Some(v),
-                NftSet(v) => self.nftsets.push(v),
+                NftSet(v) => rule_group.nftsets.push(v),
+                KernelIpSet(v) => rule_group.domain_rules.push(ConfigForDomain {
+                    domain: v.domain,
+                    config: crate::config::DomainRule {
+                        ipset: Some(v.config),
+                        ..Default::default()
+                    },
+                }),
+                IpSetTimeout(v) => rule_group.network_sets.ipset_timeout = Some(v),
+                NftSetTimeout(v) => rule_group.network_sets.nftset_timeout = Some(v),
+                IpSetNoSpeed(v) => rule_group.network_sets.ipset_no_speed = Some(v),
+                NftSetNoSpeed(v) => rule_group.network_sets.nftset_no_speed = Some(v),
+                NftSetDebug(v) => self.nftset_debug = v,
                 HttpsRecord(v) => rule_group.https_records.push(v),
                 Server(server) => self.nameservers.push(server),
                 ResponseMode(mode) => self.response_mode = Some(mode),
@@ -981,6 +1034,19 @@ impl RuntimeConfigBuilder {
                 ServeExpiredTtl(v) => self.cache.serve_expired_ttl = Some(v),
                 ServeExpiredReplyTtl(v) => self.cache.serve_expired_reply_ttl = Some(v),
                 CacheSize(v) => self.cache.size = Some(v),
+                CacheMemorySize(v) => self.cache.memory_size = Some(v),
+                ServeExpiredPrefetchTime(v) => self.cache.expired_prefetch_time = Some(v),
+                MaxQueryLimit(v) => self.max_query_limit = Some(v),
+                WebUiEnable(v) => self.webui_enable = Some(v),
+                WebUiBind(v) => self.webui_bind = Some(v),
+                OdhcpdLeaseFile(v) => self.odhcpd_lease_file = Some(self.resolve_filepath(v)),
+                TxtRecord(v) => rule_group.domain_rules.push(ConfigForDomain {
+                    domain: v.domain,
+                    config: crate::config::DomainRule {
+                        txt: Some(vec![v.config]),
+                        ..Default::default()
+                    },
+                }),
                 ForceQtypeSoa(v) => {
                     self.force_qtype_soa.insert(v);
                 }

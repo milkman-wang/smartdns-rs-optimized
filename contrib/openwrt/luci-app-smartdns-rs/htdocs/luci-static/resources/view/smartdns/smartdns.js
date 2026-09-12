@@ -65,9 +65,9 @@ function addSpeedModes(o, withDefault) {
 		for (var i = 0; i < modes.length; i++) {
 			if (modes[i] === 'ping' || modes[i] === 'http' || modes[i] === 'https')
 				continue;
-			if (/^(tcp|http|https):[0-9]+$/.test(modes[i]))
+			if (/^(tcp|tcp-syn|http|https):[0-9]+$/.test(modes[i]))
 				continue;
-			return _('Supported modes are ping, tcp:PORT, http[:PORT], https[:PORT], and none.');
+			return _('Supported modes are ping, tcp:PORT, tcp-syn:PORT, http[:PORT], https[:PORT], and none.');
 		}
 		return true;
 	};
@@ -232,6 +232,68 @@ return view.extend({
 		o.default = o.enabled;
 		o.rmempty = false;
 
+		o = s.taboption('advanced', form.Value, 'num_workers', _('Worker Threads'));
+		o.datatype = 'range(1,128)';
+		o.placeholder = "2";
+
+		o = s.taboption('advanced', form.Value, 'cache_mem_size', _('Cache Memory Budget'));
+		o.placeholder = "16MiB";
+
+		o = s.taboption('advanced', form.Value, 'max_query_limit', _('Maximum Concurrent Queries'));
+		o.datatype = 'uinteger';
+		o.placeholder = "0";
+
+		o = s.taboption('advanced', form.Value, 'serve_expired_ttl', _('Maximum Stale Lifetime'));
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.Value, 'serve_expired_reply_ttl', _('Stale Reply TTL'));
+		o.datatype = 'uinteger';
+
+		o = s.taboption('advanced', form.Value, 'serve_expired_prefetch_time', _('Expired Cache Refresh Interval'));
+		o.datatype = 'uinteger';
+		o.placeholder = "300";
+
+		o = s.taboption('advanced', form.Value, 'domain', _('Local Domain Suffix'));
+		o.placeholder = "home";
+
+		o = s.taboption('advanced', form.Value, 'odhcpd_lease_file', _('Odhcpd Lease File'));
+		o.placeholder = "/tmp/hosts/odhcpd";
+
+		o = s.taboption('advanced', form.ListValue, 'webui_enable', _('Enable Built-in WebUI (WebUI Package Required)'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('advanced', form.Value, 'webui_bind', _('Built-in WebUI Listen Address'));
+		o.placeholder = "127.0.0.1:6080";
+
+		o = s.taboption('advanced', form.Value, 'ipset_name', _('Kernel IP Set'));
+		o.placeholder = "#4:route4,#6:route6";
+
+		o = s.taboption('advanced', form.Value, 'nftset_name', _('NFT Set'));
+		o.placeholder = "#4:inet#fw4#route4";
+
+		o = s.taboption('advanced', form.ListValue, 'ipset_timeout', _('IP Set Entry Timeouts'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('advanced', form.ListValue, 'nftset_timeout', _('NFT Set Entry Timeouts'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('advanced', form.Value, 'ipset_no_speed', _('IP Sets for Failed Probes'));
+		o.placeholder = "#4:slow4,#6:slow6";
+
+		o = s.taboption('advanced', form.Value, 'nftset_no_speed', _('NFT Sets for Failed Probes'));
+		o.placeholder = "#4:inet#fw4#slow4";
+
+		o = s.taboption('advanced', form.ListValue, 'nftset_debug', _('NFT Set Debug Logging'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
 		o = s.taboption('advanced', form.Flag, 'prefetch_domain', _('Domain Prefetch'));
 		o.default = o.disabled;
 
@@ -240,7 +302,8 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.taboption('advanced', form.Value, 'cache_size', _('Cache Size'));
-		o.datatype = 'uinteger';
+		o.datatype = 'integer';
+		o.validate = function(section, value) { return /^(-1|[0-9]+)$/.test(value) || _('Cache size must be -1, 0, or a positive integer.'); };
 		o.default = '4096';
 
 		o = s.taboption('advanced', form.Flag, 'cache_persist', _('Cache Persist'));
@@ -280,6 +343,24 @@ return view.extend({
 		o = s.taboption('advanced', form.Value, 'dns64', _('DNS64 Prefix'));
 		o.datatype = 'cidr6';
 		o.placeholder = '64:ff9b::/96';
+
+		o = s.taboption('listeners', form.Flag, 'ddr', _('Advertise Encrypted Listeners (DDR)'));
+
+		o = s.taboption('listeners', form.ListValue, 'bind_cert_generate', _('Automatic Local Certificate Generation'));
+		o.value('', _('Default'));
+		o.value('auto', _('Automatic'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('listeners', form.DynamicList, 'bind_cert_san', _('Certificate Names and IP Addresses'));
+		o.placeholder = "resolver.home";
+
+		o = s.taboption('listeners', form.Value, 'bind_cert_validity_days', _('Certificate Validity (Days)'));
+		o.datatype = 'uinteger';
+		o.placeholder = "390";
+
+		o = s.taboption('listeners', form.Value, 'bind_cert_root_key_file', _('Local CA Key File'));
+		o.placeholder = "/etc/smartdns/smartdns-root-key.pem";
 
 		o = s.taboption('listeners', form.Flag, 'tls_server', _('DNS-over-TLS Server'));
 		o.default = o.disabled;
@@ -332,6 +413,17 @@ return view.extend({
 		o = s.taboption('second', form.Flag, 'seconddns_' + item[0], item[1]);
 		o.depends('seconddns_enabled', '1');
 	});
+		o = s.taboption('second', form.Value, 'seconddns_ipset_name', _('Kernel IP Set'));
+		o.placeholder = "#4:route4,#6:route6";
+		o.depends('seconddns_enabled', '1');
+
+		o = s.taboption('second', form.Value, 'seconddns_nftset_name', _('NFT Set'));
+		o.placeholder = "#4:inet#fw4#route4";
+		o.depends('seconddns_enabled', '1');
+
+		o = s.taboption('second', form.Flag, 'seconddns_no_serve_expired', _('Disable Stale Replies'));
+		o.depends('seconddns_enabled', '1');
+
 		o = s.taboption('second', form.Value, 'seconddns_server_flags', _('Additional Listener Arguments'));
 		o.depends('seconddns_enabled', '1');
 
@@ -406,6 +498,34 @@ return view.extend({
 				ui.addNotification(null, E('p', {}, [ res.stdout || _('Files updated.') ]));
 			});
 		};
+
+		o = s.taboption('logging', form.ListValue, 'log_syslog', _('Send Logs to Syslog'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('logging', form.ListValue, 'audit_soa', _('Include SOA in Audit Logs'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('logging', form.ListValue, 'audit_console', _('Audit to Console'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('logging', form.ListValue, 'audit_syslog', _('Audit to Syslog'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('logging', form.ListValue, 'debug_save_fail_packet', _('Capture Malformed DNS Packets'));
+		o.value('', _('Default'));
+		o.value('yes', _('Yes'));
+		o.value('no', _('No'));
+
+		o = s.taboption('logging', form.Value, 'debug_save_fail_packet_dir', _('Malformed Packet Directory'));
+		o.placeholder = "/tmp/smartdns";
 
 		o = s.taboption('logging', form.ListValue, 'log_level', _('Log Level'));
 		o.value('error', _('Error'));
@@ -487,6 +607,9 @@ return view.extend({
 		o.modalonly = true;
 		o = s.option(form.Flag, 'check_edns', _('Require EDNS'));
 		o.modalonly = true;
+		o = s.option(form.Value, 'spki_pin', _('TLS SPKI Pin (Base64 SHA-256)'));
+		o.modalonly = true;
+
 		o = s.option(form.Value, 'tls_host_verify', _('TLS Hostname Verify'));
 		o.modalonly = true;
 		o = s.option(form.Value, 'host_name', _('TLS SNI Name'));
@@ -523,6 +646,13 @@ return view.extend({
 		o.modalonly = true;
 		o = s.option(form.Flag, 'force_aaaa_soa', _('Force AAAA SOA'));
 		o.modalonly = true;
+		o = s.option(form.Value, 'ipset_name', _('Kernel IP Set'));
+		o.placeholder = "#4:route4,#6:route6";
+		o.modalonly = true;
+
+		o = s.option(form.Flag, 'no_serve_expired', _('Disable Stale Replies'));
+		o.modalonly = true;
+
 		o = s.option(form.Value, 'nftset_name', _('NFT Set'));
 		o.validate = validateNftset;
 		o.modalonly = true;
@@ -545,6 +675,11 @@ return view.extend({
 		o.value('yes', _('Yes'));
 		o.value('no', _('No'));
 		o = s.taboption('forward', form.Flag, 'force_aaaa_soa', _('Force AAAA SOA'));
+		o = s.taboption('forward', form.Value, 'ipset_name', _('Kernel IP Set'));
+		o.placeholder = "#4:route4,#6:route6";
+
+		o = s.taboption('forward', form.Flag, 'no_serve_expired', _('Disable Stale Replies'));
+
 		o = s.taboption('forward', form.Value, 'nftset_name', _('NFT Set'));
 		o.validate = validateNftset;
 		o = s.taboption('forward', form.FileUpload, 'forwarding_domain_set_file', _('Forwarding Domain File'));
@@ -589,6 +724,13 @@ return view.extend({
 		o.modalonly = true;
 		o = s.option(form.Flag, 'force_aaaa_soa', _('Force AAAA SOA'));
 		o.modalonly = true;
+		o = s.option(form.Value, 'ipset_name', _('Kernel IP Set'));
+		o.placeholder = "#4:route4,#6:route6";
+		o.modalonly = true;
+
+		o = s.option(form.Flag, 'no_serve_expired', _('Disable Stale Replies'));
+		o.modalonly = true;
+
 		o = s.option(form.Value, 'nftset_name', _('NFT Set'));
 		o.validate = validateNftset;
 		o.modalonly = true;

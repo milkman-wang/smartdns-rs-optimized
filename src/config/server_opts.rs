@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerOpts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ddr: Option<bool>,
+    #[serde(skip)]
+    pub local_addr: Option<std::net::SocketAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipset: Option<Vec<super::ConfigForIP<super::KernelIpSet>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nftset: Option<Vec<super::ConfigForIP<super::NFTsetConfig>>>,
     /// set domain request to use the appropriate server group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -124,6 +132,10 @@ impl ServerOpts {
 
     pub fn apply(&mut self, other: Self) {
         let Self {
+            ddr,
+            local_addr,
+            ipset,
+            nftset,
             group,
             no_rule_addr,
             no_rule_nameserver,
@@ -138,6 +150,10 @@ impl ServerOpts {
             is_background: _,
             rule_group,
         } = other;
+        self.ddr = self.ddr.or(ddr);
+        self.local_addr = self.local_addr.or(local_addr);
+        self.ipset = self.ipset.take().or(ipset);
+        self.nftset = self.nftset.take().or(nftset);
 
         if self.group.is_none() {
             self.group = group;

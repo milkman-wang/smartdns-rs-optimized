@@ -18,16 +18,14 @@ use crate::{
 };
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::Path,
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 use tokio_util::sync::CancellationToken;
 
 use futures_util::FutureExt;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinSet,
-};
+#[cfg(test)]
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 use crate::{
     app::App,
@@ -41,32 +39,26 @@ pub fn serve(
     bind_addr_config: &BindAddrConfig,
     handle: &DnsHandle,
     idle_time: u64,
-    certificate_file: Option<&Path>,
-    certificate_key_file: Option<&Path>,
 ) -> Result<ServerHandle, crate::Error> {
     use crate::rustls::TlsServerCertResolver;
     use net::{bind_to, setup_tcp_socket, setup_udp_socket};
     use std::time::Duration;
 
-    let dns_handle = handle.with_new_opt(bind_addr_config.server_opts().clone());
+    let mut opts = bind_addr_config.server_opts().clone();
+    opts.local_addr = Some(bind_addr_config.sock_addr());
+    let dns_handle = handle.with_new_opt(opts);
 
     fn create_cert_resolver(
+        cfg: &RuntimeConfig,
         ssl_config: &SslConfig,
-        certificate_file: Option<&Path>,
-        certificate_key_file: Option<&Path>,
-        typ: &'static str,
     ) -> Result<Arc<TlsServerCertResolver>, crate::Error> {
-        let certificate_file = ssl_config
-            .certificate
+        let (certificate, key) = crate::rustls::prepare_server_certificate(cfg, ssl_config)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let password = ssl_config
+            .certificate_key_pass
             .as_deref()
-            .or(certificate_file)
-            .ok_or(crate::Error::CertificatePathNotDefined(typ))?;
-        let certificate_key_file = ssl_config
-            .certificate_key
-            .as_deref()
-            .or(certificate_key_file)
-            .ok_or(crate::Error::CertificateKeyPathNotDefined(typ))?;
-        let resolver = TlsServerCertResolver::new(certificate_file, certificate_key_file)?;
+            .or(cfg.bind_cert_key_pass());
+        let resolver = TlsServerCertResolver::new(&certificate, &key, password)?;
         Ok(Arc::new(resolver))
     }
 
@@ -94,12 +86,7 @@ pub fn serve(
             const LISTENER_TYPE: &str = "DNS over TLS";
             let ssl_config = &bind_addr_config.ssl_config;
 
-            let server_cert_resolver = create_cert_resolver(
-                ssl_config,
-                certificate_file,
-                certificate_key_file,
-                LISTENER_TYPE,
-            )?;
+            let server_cert_resolver = create_cert_resolver(cfg, ssl_config)?;
 
             let listener = bind_to(
                 setup_tcp_socket,
@@ -134,12 +121,7 @@ pub fn serve(
             const LISTENER_TYPE: &str = "DNS over HTTPS";
             let ssl_config = &bind_addr_config.ssl_config;
 
-            let server_cert_resolver = create_cert_resolver(
-                ssl_config,
-                certificate_file,
-                certificate_key_file,
-                LISTENER_TYPE,
-            )?;
+            let server_cert_resolver = create_cert_resolver(cfg, ssl_config)?;
 
             let listener = bind_to(
                 setup_tcp_socket,
@@ -163,12 +145,7 @@ pub fn serve(
             const LISTENER_TYPE: &str = "DNS over H3";
             let ssl_config = &bind_addr_config.ssl_config;
 
-            let server_cert_resolver = create_cert_resolver(
-                ssl_config,
-                certificate_file,
-                certificate_key_file,
-                LISTENER_TYPE,
-            )?;
+            let server_cert_resolver = create_cert_resolver(cfg, ssl_config)?;
 
             let listener = bind_to(
                 setup_udp_socket,
@@ -185,12 +162,7 @@ pub fn serve(
             const LISTENER_TYPE: &str = "DNS over QUIC";
             let ssl_config = &bind_addr_config.ssl_config;
 
-            let server_cert_resolver = create_cert_resolver(
-                ssl_config,
-                certificate_file,
-                certificate_key_file,
-                LISTENER_TYPE,
-            )?;
+            let server_cert_resolver = create_cert_resolver(cfg, ssl_config)?;
 
             let listener = bind_to(
                 setup_udp_socket,
@@ -242,59 +214,71 @@ impl From<CancellationToken> for ServerHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DnsHandle {
-    sender: mpsc::UnboundedSender<IncomingDnsMessage>,
+    dispatcher: Weak<crate::app::QueryDispatcher>,
     opts: ServerOpts,
+    #[cfg(test)]
+    sender: Option<mpsc::UnboundedSender<IncomingDnsMessage>>,
 }
 
+#[cfg(test)]
 pub type IncomingDnsMessage = (SerialMessage, ServerOpts, oneshot::Sender<SerialMessage>);
 
-pub type IncomingDnsRequest = mpsc::UnboundedReceiver<IncomingDnsMessage>;
-
 impl DnsHandle {
-    pub fn new() -> (IncomingDnsRequest, Self) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            rx,
-            Self {
-                sender: tx,
-                opts: Default::default(),
-            },
-        )
+    pub(crate) fn new(dispatcher: Weak<crate::app::QueryDispatcher>) -> Self {
+        Self {
+            dispatcher,
+            opts: Default::default(),
+            #[cfg(test)]
+            sender: None,
+        }
     }
 
     pub async fn send<T: Into<SerialMessage>>(&self, message: T) -> SerialMessage {
         let message = message.into();
-        let (tx, rx) = oneshot::channel();
-
-        if let Err(err) = self.sender.send((message, self.opts.clone(), tx)) {
-            let message = err.0.0;
-            let addr = message.addr();
-            let protocol = message.protocol();
-            let mut response_message = DnsRequest::try_from(message)
-                .map(|req| req.to_response())
-                .unwrap_or_else(|_| Message::query().to_response());
-            response_message.set_response_code(ResponseCode::Refused);
-            return SerialMessage::raw(response_message, addr, protocol);
-        }
-
-        match rx.await {
-            Ok(msg) => msg,
-            Err(_) => {
-                let mut response_message = Message::query().to_response();
-                response_message.set_response_code(ResponseCode::Refused);
-                response_message.into()
+        #[cfg(test)]
+        if let Some(sender) = &self.sender {
+            let (tx, rx) = oneshot::channel();
+            if let Err(err) = sender.send((message, self.opts.clone(), tx)) {
+                return refused_response(err.0.0);
             }
+            return rx.await.unwrap_or_else(|_| {
+                let mut response = Message::query().to_response();
+                response.set_response_code(ResponseCode::Refused);
+                response.into()
+            });
+        }
+        match self.dispatcher.upgrade() {
+            Some(dispatcher) => dispatcher.send(message, &self.opts).await,
+            None => refused_response(message),
         }
     }
 
     pub fn with_new_opt(&self, opts: ServerOpts) -> Self {
         Self {
-            sender: self.sender.clone(),
             opts,
+            ..self.clone()
         }
     }
+
+    #[cfg(test)]
+    pub fn mock() -> (mpsc::UnboundedReceiver<IncomingDnsMessage>, Self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut handle = Self::new(Weak::new());
+        handle.sender = Some(tx);
+        (rx, handle)
+    }
+}
+
+pub(crate) fn refused_response(message: SerialMessage) -> SerialMessage {
+    let addr = message.addr();
+    let protocol = message.protocol();
+    let mut response = DnsRequest::try_from(message)
+        .map(|req| req.to_response())
+        .unwrap_or_else(|_| Message::query().to_response());
+    response.set_response_code(ResponseCode::Refused);
+    SerialMessage::raw(response, addr, protocol)
 }
 
 /// Reap finished tasks from a `JoinSet`, without awaiting or blocking.

@@ -1,11 +1,9 @@
 use std::io;
 use std::io::Write;
-use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
 use chrono::prelude::*;
-use smallvec::SmallVec;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::dns::*;
@@ -16,6 +14,7 @@ use crate::middleware::*;
 
 pub struct DnsAuditMiddleware {
     audit_sender: Sender<DnsAuditRecord>,
+    include_soa: bool,
 }
 
 #[async_trait::async_trait]
@@ -33,6 +32,13 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
         let res = next.run(ctx, req).await;
 
         let duration = start.elapsed();
+        if !self.include_soa && is_soa_only(&res, req.query().original()) {
+            return res;
+        }
+        let speed = match res.as_ref().map(|response| response.probe_result()) {
+            Ok(ProbeResult::Measured(speed)) => speed,
+            _ => ctx.fastest_speed,
+        };
 
         let audit = DnsAuditRecord {
             id: req.id(),
@@ -41,7 +47,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
             query: req.query().original().to_owned(),
             result: res.clone(),
             elapsed: duration,
-            speed: ctx.fastest_speed,
+            speed,
             lookup_source: ctx.source.clone(),
         };
 
@@ -57,37 +63,70 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsAuditMiddl
 }
 
 impl DnsAuditMiddleware {
-    pub fn new<P: AsRef<Path>>(
-        path: P,
-        audit_size: u64,
-        audit_num: usize,
-        mode: Option<u32>,
-    ) -> Self {
-        let audit_file = path.as_ref().to_owned();
-
+    pub fn new(cfg: &crate::dns_conf::RuntimeConfig) -> Self {
+        let config = cfg.audit_config();
+        let console = config.console.unwrap_or(false);
+        let syslog = config.syslog.unwrap_or(false);
+        let include_soa = config.soa.unwrap_or(false);
+        let path = cfg
+            .audit_file()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| cfg.log_file().with_file_name("smartdns-audit.log"));
+        let mut file = (!syslog && cfg.audit_num() > 0).then(|| {
+            MappedFile::open(
+                path,
+                cfg.audit_size(),
+                Some(cfg.audit_num()),
+                Some(cfg.audit_file_mode()),
+            )
+        });
         let (audit_tx, mut audit_rx) = mpsc::channel::<DnsAuditRecord>(100);
-
         tokio::spawn(async move {
-            let mut audit_file = MappedFile::open(audit_file, audit_size, Some(audit_num), mode);
-
-            const BUF_SIZE: usize = 10;
-            let mut buf: SmallVec<[DnsAuditRecord; BUF_SIZE]> = SmallVec::new();
-
-            while let Some(audit) = audit_rx.recv().await {
-                buf.push(audit);
-                if buf.len() == BUF_SIZE {
-                    if let Err(err) = record_audit_to_file(&mut audit_file, buf.as_slice()) {
-                        warn!("log audit failed {}", err)
+            let mut batch = Vec::with_capacity(10);
+            while audit_rx.recv_many(&mut batch, 10).await > 0 {
+                for audit in &batch {
+                    crate::plugins::audit(&audit.to_string());
+                    if console {
+                        let _ = writeln!(io::stdout(), "{audit}");
                     }
-                    buf.clear();
+                    if syslog
+                        && let Err(error) = crate::infra::syslog::send(
+                            crate::log::Level::INFO,
+                            &audit.to_string_without_date(),
+                        )
+                    {
+                        warn!("audit syslog failed: {error}");
+                    }
                 }
+                if let Some(file) = file.as_mut()
+                    && let Err(error) = record_audit_to_file(file, &batch)
+                {
+                    warn!("log audit failed {error}");
+                }
+                batch.clear();
             }
         });
-
         Self {
             audit_sender: audit_tx,
+            include_soa,
         }
     }
+}
+
+fn is_soa_only(result: &Result<DnsResponse, DnsError>, query: &Query) -> bool {
+    let response = match result {
+        Ok(response) => std::borrow::Cow::Borrowed(response),
+        Err(error) => match error.as_no_records_response(query) {
+            Some(response) => std::borrow::Cow::Owned(response),
+            None => return false,
+        },
+    };
+    response.ip_addrs_iter().next().is_none()
+        && response
+            .answers()
+            .iter()
+            .chain(response.authorities())
+            .any(|record| record.record_type() == RecordType::SOA)
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +149,7 @@ impl DnsAuditRecord {
             for (i, record) in lookup
                 .records()
                 .iter()
-                // .filter(|r| r.data().is_some())
+                .chain(lookup.authorities())
                 .enumerate()
             {
                 let data = record.data();
@@ -225,6 +264,7 @@ fn record_audit_to_file(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
 
     use crate::libdns::proto::op::Query;
     use crate::libdns::proto::rr::{RData, RecordType};
@@ -232,6 +272,44 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_single_audit_is_written_without_waiting_for_ten_queries() {
+        let file =
+            std::env::temp_dir().join(format!("smartdns-audit-{}.log", rand::random::<u64>()));
+        let mut builder = crate::dns_conf::RuntimeConfig::builder();
+        builder.audit.file = Some(file.clone());
+        let cfg = builder.build().unwrap();
+        let middleware = DnsAuditMiddleware::new(&cfg);
+        let query = Query::query("single.example.".parse().unwrap(), RecordType::A);
+        let response =
+            DnsResponse::from_rdata(query.clone(), RData::A("192.0.2.4".parse().unwrap()));
+        middleware
+            .audit_sender
+            .send(DnsAuditRecord {
+                id: 1,
+                client: "127.0.0.1".into(),
+                query,
+                result: Ok(response),
+                speed: Duration::ZERO,
+                elapsed: Duration::ZERO,
+                date: Local::now(),
+                lookup_source: LookupFrom::Static,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if std::fs::read_to_string(&file).is_ok_and(|s| s.contains("single.example.")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::remove_file(file).unwrap();
+    }
 
     #[test]
     fn test_dns_audit_to_string() {

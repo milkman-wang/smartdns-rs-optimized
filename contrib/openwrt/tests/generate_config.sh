@@ -11,9 +11,33 @@ INIT_SCRIPT="$SCRIPT_DIR/../smartdns-rs/files/etc/init.d/smartdns"
 
 mock_value()
 {
+    if [ "${TEST_NEW_FEATURES:-0}" = 1 ]; then
+        case "$1.$2" in
+            global.num_workers) echo 1; return ;;
+            global.cache_size) echo -1; return ;;
+            global.cache_mem_size) echo 16MiB; return ;;
+            global.max_query_limit) echo 128; return ;;
+            global.serve_expired_prefetch_time) echo 300; return ;;
+            global.ipset_name) echo '#4:route4,#6:route6'; return ;;
+            global.ipset_timeout) echo yes; return ;;
+            global.domain) echo home; return ;;
+            global.odhcpd_lease_file) echo /tmp/hosts/odhcpd; return ;;
+            global.log_syslog|global.audit_soa) echo yes; return ;;
+            global.tls_server|global.ddr) echo 1; return ;;
+            global.bind_cert_generate) echo auto; return ;;
+            global.bind_cert_san) echo 'resolver.home 192.168.1.1'; return ;;
+            global.seconddns_ipset_name) echo '#4:second4'; return ;;
+            global.seconddns_no_serve_expired) echo 1; return ;;
+            dns0.spki_pin) echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='; return ;;
+            client0.ipset_name|domain0.ipset_name|list0.ipset_name) echo '#4:rule4'; return ;;
+            client0.no_serve_expired|domain0.no_serve_expired|list0.no_serve_expired) echo 1; return ;;
+        esac
+    fi
 	case "$1.$2" in
 		global.enabled) echo 1 ;;
 		global.port) echo 6053 ;;
+		global.webui_enable) echo 1 ;;
+		global.webui_bind) echo 127.0.0.1:6080 ;;
 		global.auto_set_dnsmasq) echo 1 ;;
 		global.tcp_server) echo 1 ;;
 		global.ipv6_server) echo 1 ;;
@@ -163,6 +187,8 @@ assert_line()
 }
 
 assert_line 'user nobody'
+assert_line 'webui-enable yes'
+assert_line 'webui-bind 127.0.0.1:6080'
 assert_line 'speed-check-mode ping,tcp:80,tcp:443'
 assert_line 'response-mode first-ping'
 assert_line 'bind 0.0.0.0:6053@br-lan '
@@ -197,3 +223,25 @@ assert_line 'speed-check-mode ping,tcp:80,tcp:443'
 assert_line 'response-mode first-ping'
 
 echo "OpenWrt generated configuration smoke test: OK"
+
+TEST_NEW_FEATURES=1
+generate_config
+assert_line 'num-workers 1'
+assert_line 'cache-size -1'
+assert_line 'cache-mem-size 16MiB'
+assert_line 'max-query-limit 128'
+assert_line 'serve-expired-prefetch-time 300'
+assert_line 'ipset /./#4:route4,#6:route6'
+assert_line 'ipset-timeout yes'
+assert_line 'domain home'
+assert_line 'odhcpd-lease-file /tmp/hosts/odhcpd'
+assert_line 'log-syslog yes'
+assert_line 'audit-SOA yes'
+assert_line 'bind-cert-generate auto'
+assert_line 'bind-cert-san resolver.home 192.168.1.1'
+assert_line 'bind-tls 0.0.0.0:853@br-lan  -ddr'
+assert_line 'bind 0.0.0.0:6553@br-lan  -group overseas -no-rule-addr -force-aaaa-soa -ipset #4:second4 -no-serve-expired'
+assert_line 'server-https https://dns.example/dns-query -spki-pin AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= -tls-host-verify dns.example -group domestic-v4 -set-mark 0xff'
+assert_line 'domain-rules /./ -dualstack-ip-selection no -address #6 -nftset #4:inet#fw-4#smartdns-v4 -ipset #4:rule4 -no-serve-expired'
+assert_line 'domain-rules /domain-set:domain-list0/ -nameserver overseas -address #6 -ipset #4:rule4 -no-serve-expired -no-cache'
+echo "OpenWrt new feature configuration test: OK"

@@ -228,8 +228,9 @@ impl From<ResolveCommand> for Cli {
 fn build_version() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "{} 🕙 {}",
+            "{} ({}) 🕙 {}",
             env!("CARGO_PKG_VERSION"),
+            crate::BUILD_FLAVOR,
             crate::BUILD_DATE.with_timezone(&chrono::Local)
         )
     });

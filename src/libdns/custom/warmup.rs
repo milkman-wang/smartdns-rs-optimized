@@ -3,7 +3,7 @@ use crate::libdns::proto::{
     xfer::{DnsHandle, FirstAnswer},
 };
 
-static DEFAULT_QUERY: std::sync::LazyLock<crate::libdns::proto::xfer::DnsRequest> =
+pub(super) static DEFAULT_QUERY: std::sync::LazyLock<crate::libdns::proto::xfer::DnsRequest> =
     std::sync::LazyLock::new(|| {
         use crate::libdns::proto::{
             op::{Message, Query},

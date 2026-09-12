@@ -1,0 +1,13 @@
+[package]
+name = "router-dnsbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "router_dnsbench"
+path = "router_dnsbench.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

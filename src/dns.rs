@@ -32,6 +32,7 @@ pub struct DnsContext {
     pub fastest_speed: Duration,
     pub source: LookupFrom,
     pub no_cache: bool,
+    pub is_dualstack: bool,
 }
 
 impl DnsContext {
@@ -48,6 +49,7 @@ impl DnsContext {
             fastest_speed: Default::default(),
             source: Default::default(),
             no_cache,
+            is_dualstack: false,
         }
     }
 
@@ -113,16 +115,28 @@ mod serial_message {
 
     use crate::dns_error::LookupError;
     use crate::libdns::Protocol;
-    use crate::libdns::proto::{ProtoError, op::Query};
+    use crate::libdns::proto::{
+        ProtoError,
+        op::{Header, Query, ResponseCode},
+        serialize::binary::{BinEncodable, BinEncoder},
+    };
     use crate::{config::ServerOpts, libdns::proto::op::Message};
     use bytes::Bytes;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
 
     use super::{DnsRequest, DnsResponse};
 
     pub enum SerialMessage {
         Raw(Box<Message>, SocketAddr, Protocol),
         Bytes(Vec<u8>, SocketAddr, Protocol),
+        Reply(
+            Arc<Message>,
+            Header,
+            Option<Arc<[u8]>>,
+            SocketAddr,
+            Protocol,
+        ),
     }
 
     impl SerialMessage {
@@ -133,6 +147,23 @@ mod serial_message {
             Self::Raw(message.into(), addr, protocol)
         }
 
+        /// Use the request's reply header without copying shared cached records.
+        pub fn reply(
+            mut message: DnsResponse,
+            mut header: Header,
+            addr: SocketAddr,
+            protocol: Protocol,
+        ) -> Self {
+            header.set_truncated(header.truncated() || message.truncated());
+            if header.response_code() == ResponseCode::NoError {
+                header.set_response_code(message.response_code());
+            } else if header.response_code() != message.response_code() {
+                message.set_response_code(header.response_code());
+            }
+            let (message, wire) = message.into_reply_parts();
+            Self::Reply(message, header, wire, addr, protocol)
+        }
+
         pub fn is_binray(&self) -> bool {
             matches!(self, SerialMessage::Bytes(_, _, _))
         }
@@ -141,6 +172,7 @@ mod serial_message {
             match self {
                 SerialMessage::Raw(_, _, p) => *p,
                 SerialMessage::Bytes(_, _, p) => *p,
+                SerialMessage::Reply(_, _, _, _, p) => *p,
             }
         }
 
@@ -148,6 +180,7 @@ mod serial_message {
             match self {
                 SerialMessage::Raw(_, a, _) => *a,
                 SerialMessage::Bytes(_, a, _) => *a,
+                SerialMessage::Reply(_, _, _, a, _) => *a,
             }
         }
     }
@@ -176,6 +209,20 @@ mod serial_message {
             Ok(match value {
                 SerialMessage::Bytes(bytes, addr, _) => Self::new(bytes, addr),
                 SerialMessage::Raw(message, addr, _) => Self::new(message.to_vec()?, addr),
+                SerialMessage::Reply(message, mut header, wire, addr, _) => {
+                    let mut bytes = match wire {
+                        Some(wire) => wire.to_vec(),
+                        None => message.to_vec()?,
+                    };
+                    // Encoding computes section counts from the records. Keep
+                    // those counts when replacing the request-dependent flags.
+                    let counts: [u8; 8] = bytes[4..12].try_into().unwrap();
+                    // The encoder can also truncate records at the wire limit.
+                    header.set_truncated(header.truncated() || bytes[2] & 0x02 != 0);
+                    header.emit(&mut BinEncoder::new(&mut bytes))?;
+                    bytes[4..12].copy_from_slice(&counts);
+                    Self::new(bytes, addr)
+                }
             })
         }
     }
@@ -206,8 +253,13 @@ mod serial_message {
 
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             match value {
-                SerialMessage::Raw(message, _, _) => Ok(message.as_ref().clone()),
+                SerialMessage::Raw(message, _, _) => Ok(*message),
                 SerialMessage::Bytes(bytes, _, _) => Message::from_vec(&bytes),
+                SerialMessage::Reply(message, header, _, _, _) => {
+                    let mut message = Arc::unwrap_or_clone(message);
+                    message.set_header(header);
+                    Ok(message)
+                }
             }
         }
     }
@@ -366,15 +418,25 @@ mod request {
 
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             match value {
-                SerialMessage::Raw(message, src_addr, protocol) => Ok(DnsRequest::new(
-                    message.as_ref().clone(),
-                    src_addr,
-                    protocol,
-                )),
+                SerialMessage::Reply(message, header, _, src_addr, protocol) => {
+                    let mut message = Arc::unwrap_or_clone(message);
+                    message.set_header(header);
+                    Ok(DnsRequest::new(message, src_addr, protocol))
+                }
+                SerialMessage::Raw(message, src_addr, protocol) => {
+                    Ok(DnsRequest::new(*message, src_addr, protocol))
+                }
                 SerialMessage::Bytes(bytes, src_addr, protocol) => {
                     use crate::libdns::proto::serialize::binary::{BinDecodable, BinDecoder};
                     let mut decoder = BinDecoder::new(&bytes);
-                    let message = Message::read(&mut decoder)?;
+                    let message = Message::read(&mut decoder).inspect_err(|_| {
+                        crate::infra::packet_debug::save(
+                            "server",
+                            src_addr,
+                            &protocol.to_string(),
+                            &bytes,
+                        );
+                    })?;
                     Ok(DnsRequest::new(message, src_addr, protocol))
                 }
             }
@@ -386,6 +448,7 @@ mod response {
 
     use crate::dns_client::MAX_TTL;
     use crate::libdns::proto::{
+        ProtoError,
         op::{self, Header, Message, MessageType, Query},
         rr::{RData, Record},
     };
@@ -400,11 +463,22 @@ mod response {
 
     static DEFAULT_QUERY: once_cell::sync::Lazy<Query> = once_cell::sync::Lazy::new(Query::default);
 
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum ProbeResult {
+        #[default]
+        Unchecked,
+        Failed,
+        Measured(Duration),
+    }
+
     #[derive(Debug, Clone, Eq)]
     pub struct DnsResponse {
-        message: Message,
+        message: Arc<Message>,
+        prepared_wire: Option<Arc<[u8]>>,
+        wire_len: Option<std::num::NonZeroUsize>,
         valid_until: Instant,
         name_server_group: Option<String>,
+        probe_result: ProbeResult,
     }
 
     impl PartialEq for DnsResponse {
@@ -430,7 +504,7 @@ mod response {
         {
             use op::message::{HeaderCounts, update_header_counts};
             let mut message = Message::query().to_response();
-            message.add_query(query.clone());
+            message.add_query(query);
             message.add_answers(records);
 
             let header = update_header_counts(
@@ -447,17 +521,23 @@ mod response {
             message.set_header(header);
 
             Self {
-                message,
+                message: Arc::new(message),
+                prepared_wire: None,
+                wire_len: None,
                 valid_until,
                 name_server_group: None,
+                probe_result: ProbeResult::Unchecked,
             }
         }
 
         pub fn empty() -> Self {
             Self {
-                message: Message::query(),
+                message: Arc::new(Message::query()),
+                prepared_wire: None,
+                wire_len: None,
                 valid_until: Instant::now(),
                 name_server_group: None,
+                probe_result: ProbeResult::Unchecked,
             }
         }
 
@@ -473,6 +553,34 @@ mod response {
 
         pub fn message(&self) -> &Message {
             &self.message
+        }
+
+        /// Received payload size for cache accounting while the message
+        /// structure is unchanged. TTL and routing metadata do not change it.
+        pub fn wire_len(&self) -> Option<usize> {
+            self.wire_len.map(std::num::NonZeroUsize::get)
+        }
+
+        /// Retain the encoding of an admitted hot-cache response.
+        pub fn prepare_wire(&mut self) {
+            if self.prepared_wire.is_none() {
+                self.prepared_wire = self.message.to_vec().ok().map(Arc::from);
+            }
+        }
+
+        /// Estimated retained encoding storage, including its Arc counters.
+        pub fn prepared_wire_memory(&self) -> usize {
+            self.prepared_wire
+                .as_ref()
+                .map_or(0, |wire| wire.len() + 2 * std::mem::size_of::<usize>())
+        }
+
+        /// Encode the current message, reusing an unchanged prepared response.
+        pub fn to_vec(&self) -> Result<Vec<u8>, ProtoError> {
+            match &self.prepared_wire {
+                Some(wire) => Ok(wire.to_vec()),
+                None => self.message.to_vec(),
+            }
         }
 
         pub fn valid_until(&self) -> Instant {
@@ -495,6 +603,15 @@ mod response {
 
         pub fn records(&self) -> &[Record] {
             self.answers()
+        }
+
+        pub fn probe_result(&self) -> ProbeResult {
+            self.probe_result
+        }
+
+        pub fn with_probe_result(mut self, result: ProbeResult) -> Self {
+            self.probe_result = result;
+            self
         }
 
         pub fn record_iter(&self) -> std::slice::Iter<'_, Record> {
@@ -521,17 +638,9 @@ mod response {
             self.valid_until = valid_until
         }
 
-        pub fn into_message(self, header: Option<Header>) -> Message {
-            let mut message = self.message;
-            if let Some(mut header) = header {
-                // Preserve the lookup's response code unless the caller has
-                // supplied a processing error, such as a timeout.
-                if header.response_code() == op::ResponseCode::NoError {
-                    header.set_response_code(message.response_code());
-                }
-                message.set_header(header);
-            }
-            message
+        /// Transfer the shared message and encoding without copying their contents.
+        pub(super) fn into_reply_parts(self) -> (Arc<Message>, Option<Arc<[u8]>>) {
+            (self.message, self.prepared_wire)
         }
     }
 
@@ -545,7 +654,9 @@ mod response {
 
     impl std::ops::DerefMut for DnsResponse {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.message
+            self.wire_len = None;
+            self.prepared_wire = None;
+            Arc::make_mut(&mut self.message)
         }
     }
 
@@ -561,10 +672,22 @@ mod response {
                         .unwrap_or(MAX_TTL) as u64,
                 );
             Self {
-                message,
+                message: Arc::new(message),
+                prepared_wire: None,
+                wire_len: None,
                 valid_until,
                 name_server_group: None,
+                probe_result: ProbeResult::Unchecked,
             }
+        }
+    }
+
+    impl From<crate::libdns::proto::xfer::DnsResponse> for DnsResponse {
+        fn from(response: crate::libdns::proto::xfer::DnsResponse) -> Self {
+            let wire_len = response.as_buffer().len();
+            let mut response = Self::from(response.into_message());
+            response.wire_len = std::num::NonZeroUsize::new(wire_len);
+            response
         }
     }
 
@@ -578,20 +701,43 @@ mod response {
         }
 
         pub fn set_new_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
-                record.set_ttl(ttl);
+            if self.answers().iter().any(|record| record.ttl() != ttl) {
+                self.prepared_wire = None;
+                for record in Arc::make_mut(&mut self.message).answers_mut() {
+                    record.set_ttl(ttl);
+                }
             }
         }
 
         pub fn set_max_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
+            if !self
+                .answers()
+                .iter()
+                .chain(self.authorities())
+                .chain(self.additionals())
+                .any(|record| record.ttl() > ttl)
+            {
+                return;
+            }
+            self.prepared_wire = None;
+            let message = Arc::make_mut(&mut self.message);
+            for record in message.answers_mut() {
+                record.set_max_ttl(ttl);
+            }
+            for record in message.authorities_mut() {
+                record.set_max_ttl(ttl);
+            }
+            for record in message.additionals_mut() {
                 record.set_max_ttl(ttl);
             }
         }
 
         pub fn set_min_ttl(&mut self, ttl: u32) {
-            for record in self.answers_mut() {
-                record.set_min_ttl(ttl);
+            if self.answers().iter().any(|record| record.ttl() < ttl) {
+                self.prepared_wire = None;
+                for record in Arc::make_mut(&mut self.message).answers_mut() {
+                    record.set_min_ttl(ttl);
+                }
             }
         }
     }
@@ -599,6 +745,7 @@ mod response {
 
 pub type DnsRequest = request::DnsRequest;
 pub type DnsResponse = response::DnsResponse;
+pub use response::ProbeResult;
 pub type DnsError = LookupError;
 use ipnet::IpAdd;
 pub use serial_message::SerialMessage;
@@ -633,5 +780,164 @@ impl DefaultSOA for SOA {
 impl DefaultSOA for RData {
     fn default_soa() -> Self {
         Self::SOA(SOA::default_soa())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_encoding_is_invalidated_by_ttl_records_and_edns_changes() {
+        let mut original = DnsResponse::from_rdata(
+            op::Query::query("prepared.example.".parse().unwrap(), RecordType::A),
+            "192.0.2.1".parse::<IpAddr>().unwrap().into(),
+        );
+        original.set_new_ttl(30);
+        original.prepare_wire();
+        let wire = original.to_vec().unwrap();
+        assert!(original.prepared_wire_memory() > wire.len());
+        for operation in 0..3 {
+            let mut changed = original.clone();
+            match operation {
+                0 => changed.set_new_ttl(10),
+                1 => changed.set_max_ttl(10),
+                _ => changed.set_min_ttl(40),
+            }
+            assert_eq!(changed.prepared_wire_memory(), 0);
+            let decoded = op::Message::from_vec(&changed.to_vec().unwrap()).unwrap();
+            assert_eq!(
+                decoded.answers()[0].ttl(),
+                if operation == 2 { 40 } else { 10 }
+            );
+        }
+        let mut changed = original.clone();
+        changed.answers_mut()[0].set_data("192.0.2.2".parse::<IpAddr>().unwrap().into());
+        let mut edns = op::Edns::new();
+        edns.set_max_payload(1232).set_dnssec_ok(true);
+        *changed.extensions_mut() = Some(edns);
+        let decoded = op::Message::from_vec(&changed.to_vec().unwrap()).unwrap();
+        assert_eq!(decoded.answers(), changed.answers());
+        assert_eq!(decoded.extensions(), changed.extensions());
+        assert_eq!(original.to_vec().unwrap(), wire);
+    }
+
+    #[test]
+    fn received_payload_size_survives_ttl_changes_and_invalidates_on_record_changes() {
+        let name: Name = "wire-size.example.".parse().unwrap();
+        let response = DnsResponse::from_rdata(
+            op::Query::query(name.clone(), RecordType::A),
+            "192.0.2.1".parse::<std::net::IpAddr>().unwrap().into(),
+        );
+        let wire = response.to_vec().unwrap();
+        let received = crate::libdns::proto::xfer::DnsResponse::from_buffer(wire.clone()).unwrap();
+        let mut response = DnsResponse::from(received).with_name_server_group("default".into());
+        assert_eq!(response.wire_len(), Some(wire.len()));
+        response.set_new_ttl(30);
+        response.set_max_ttl(20);
+        response.set_min_ttl(25);
+        assert_eq!(response.answers()[0].ttl(), 25);
+        assert_eq!(response.wire_len(), Some(response.to_vec().unwrap().len()));
+        response.add_answer(Record::from_rdata(
+            name,
+            25,
+            "192.0.2.2".parse::<std::net::IpAddr>().unwrap().into(),
+        ));
+        assert_eq!(response.wire_len(), None);
+        assert!(response.to_vec().unwrap().len() > wire.len());
+    }
+    #[test]
+    fn shared_responses_keep_independent_record_and_ttl_changes() {
+        let original = DnsResponse::from_rdata(
+            op::Query::query("shared.example.".parse().unwrap(), RecordType::A),
+            "192.0.2.1".parse::<IpAddr>().unwrap().into(),
+        );
+        let original_ttl = original.answers()[0].ttl();
+        let mut modified = original.clone();
+        modified.set_max_ttl(5);
+        modified.answers_mut()[0].set_data("192.0.2.2".parse::<IpAddr>().unwrap().into());
+        assert_eq!(original.answers()[0].ttl(), original_ttl);
+        assert_eq!(
+            original.ip_addrs(),
+            vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(modified.answers()[0].ttl(), 5);
+        assert_eq!(
+            modified.ip_addrs(),
+            vec!["192.0.2.2".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn shared_reply_encoding_preserves_counts_flags_and_extended_response_codes() {
+        use op::{Edns, Header, Message, MessageType, OpCode, Query, ResponseCode};
+        let mut message = Message::response(7, OpCode::Query);
+        message.add_query(Query::query(
+            "MiXeD.example.".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(Record::from_rdata(
+            "MiXeD.example.".parse().unwrap(),
+            30,
+            "192.0.2.1".parse::<IpAddr>().unwrap().into(),
+        ));
+        message.add_authority(Record::from_rdata(
+            "example.".parse().unwrap(),
+            60,
+            RData::SOA(SOA::new(
+                "ns.example.".parse().unwrap(),
+                "hostmaster.example.".parse().unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                30,
+            )),
+        ));
+        message.add_additional(Record::from_rdata(
+            "additional.example.".parse().unwrap(),
+            90,
+            RData::TXT(rr::rdata::TXT::new(vec!["payload".into()])),
+        ));
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232).set_dnssec_ok(true);
+        *message.extensions_mut() = Some(edns);
+        let mut shared = DnsResponse::from(message);
+        shared.prepare_wire();
+        for code in [
+            ResponseCode::NoError,
+            ResponseCode::ServFail,
+            ResponseCode::from(1, 7),
+        ] {
+            let mut header = Header::new(4321, MessageType::Response, OpCode::Query);
+            header
+                .set_response_code(code)
+                .set_recursion_available(true)
+                .set_authentic_data(true)
+                .set_checking_disabled(true);
+            let packet = SerialMessage::reply(
+                shared.clone(),
+                header,
+                "127.0.0.1:5300".parse().unwrap(),
+                Protocol::Udp,
+            );
+            let bytes = Vec::<u8>::try_from(packet).unwrap();
+            let decoded = Message::from_vec(&bytes).unwrap();
+            assert_eq!(decoded.id(), 4321);
+            assert_eq!(decoded.response_code(), code);
+            assert!(
+                decoded.recursion_available()
+                    && decoded.authentic_data()
+                    && decoded.checking_disabled()
+            );
+            assert_eq!(decoded.queries(), shared.queries());
+            assert_eq!(decoded.answers(), shared.answers());
+            assert_eq!(decoded.authorities(), shared.authorities());
+            assert_eq!(decoded.additionals(), shared.additionals());
+            assert_eq!(decoded.extensions().as_ref().unwrap().max_payload(), 1232);
+            assert!(decoded.extensions().as_ref().unwrap().flags().dnssec_ok);
+            assert_eq!(shared.id(), 7);
+            assert_eq!(shared.response_code(), ResponseCode::NoError);
+        }
     }
 }

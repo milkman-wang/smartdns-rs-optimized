@@ -16,6 +16,18 @@ impl RuleZoneProvider {
         next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
     ) -> Result<Option<DnsResponse>, DnsError> {
         match req.query().query_type() {
+            RecordType::TXT => {
+                if let Some(records) = ctx.domain_rule.get_ref(|r| r.txt.as_ref()) {
+                    let query = req.query().original().clone();
+                    let ttl = ctx.cfg().local_ttl() as u32;
+                    return Ok(Some(DnsResponse::new_with_max_ttl(
+                        query.clone(),
+                        records.iter().cloned().map(|txt| {
+                            Record::from_rdata(query.name().clone(), ttl, RData::TXT(txt))
+                        }),
+                    )));
+                }
+            }
             RecordType::SRV => {
                 if let Some(srv) = ctx.domain_rule.get_ref(|r| r.srv.as_ref()) {
                     return Ok(Some(DnsResponse::from_rdata(

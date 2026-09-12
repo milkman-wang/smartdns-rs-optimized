@@ -47,7 +47,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         let client = &self.client;
 
         if rtype.is_ip_addr()
-            && let Some(lookup) = client.lookup_nameserver(name.clone(), rtype).await
+            && let Some(lookup) = client.lookup_nameserver(name, rtype).await
         {
             debug!(
                 "lookup nameserver {} {} ip {:?}",
@@ -122,32 +122,22 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         if rtype.is_ip_addr() {
             let cfg = ctx.cfg();
 
-            let mut opts = match ctx.domain_rule.as_ref() {
-                Some(rule) => LookupIpOptions {
-                    response_strategy: rule
-                        .get(|n| n.response_mode)
-                        .unwrap_or_else(|| cfg.response_mode()),
-                    speed_check_mode: match rule.speed_check_mode.as_ref() {
-                        Some(mode) => Some(mode.clone()),
-                        None => cfg.speed_check_mode().cloned(),
-                    },
-                    no_speed_check: ctx.server_opts.no_speed_check(),
-                    ignore_ip: cfg.ignore_ip().clone(),
-                    blacklist_ip: cfg.blacklist_ip().clone(),
-                    whitelist_ip: cfg.whitelist_ip().clone(),
-                    ip_alias: cfg.ip_alias().clone(),
-                    lookup_options,
-                },
-                None => LookupIpOptions {
-                    response_strategy: cfg.response_mode(),
-                    speed_check_mode: cfg.speed_check_mode().cloned(),
-                    no_speed_check: ctx.server_opts.no_speed_check(),
-                    ignore_ip: cfg.ignore_ip().clone(),
-                    blacklist_ip: cfg.blacklist_ip().clone(),
-                    whitelist_ip: cfg.whitelist_ip().clone(),
-                    ip_alias: cfg.ip_alias().clone(),
-                    lookup_options,
-                },
+            let mut opts = LookupIpOptions {
+                response_strategy: ctx
+                    .domain_rule
+                    .get(|rule| rule.response_mode)
+                    .unwrap_or_else(|| cfg.response_mode()),
+                speed_check_mode: ctx
+                    .domain_rule
+                    .as_ref()
+                    .and_then(|rule| rule.speed_check_mode.as_ref())
+                    .or_else(|| cfg.speed_check_mode()),
+                no_speed_check: ctx.server_opts.no_speed_check(),
+                ignore_ip: cfg.ignore_ip(),
+                blacklist_ip: cfg.blacklist_ip(),
+                whitelist_ip: cfg.whitelist_ip(),
+                ip_alias: cfg.ip_alias(),
+                lookup_options,
             };
 
             if ctx.server_opts.is_background {
@@ -158,22 +148,22 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         } else {
             name_server.lookup(name.clone(), lookup_options).await
         }
-        .map(|res| res.with_name_server_group(group_name.to_string()))
+        .map(|res| res.with_name_server_group(group_name))
     }
 }
 
-struct LookupIpOptions {
+struct LookupIpOptions<'a> {
     response_strategy: ResponseMode,
-    speed_check_mode: Option<SpeedCheckModeList>,
+    speed_check_mode: Option<&'a SpeedCheckModeList>,
     no_speed_check: bool,
-    ignore_ip: Arc<IpSet>,
-    whitelist_ip: Arc<IpSet>,
-    blacklist_ip: Arc<IpSet>,
-    ip_alias: Arc<IpMap<Arc<[IpAddr]>>>,
+    ignore_ip: &'a IpSet,
+    whitelist_ip: &'a IpSet,
+    blacklist_ip: &'a IpSet,
+    ip_alias: &'a IpMap<Arc<[IpAddr]>>,
     lookup_options: LookupOptions,
 }
 
-impl Deref for LookupIpOptions {
+impl Deref for LookupIpOptions<'_> {
     type Target = LookupOptions;
 
     fn deref(&self) -> &Self::Target {
@@ -181,14 +171,14 @@ impl Deref for LookupIpOptions {
     }
 }
 
-impl From<LookupIpOptions> for LookupOptions {
-    fn from(value: LookupIpOptions) -> Self {
+impl From<LookupIpOptions<'_>> for LookupOptions {
+    fn from(value: LookupIpOptions<'_>) -> Self {
         value.lookup_options
     }
 }
 
-impl From<&LookupIpOptions> for LookupOptions {
-    fn from(value: &LookupIpOptions) -> Self {
+impl From<&LookupIpOptions<'_>> for LookupOptions {
+    fn from(value: &LookupIpOptions<'_>) -> Self {
         value.lookup_options.clone()
     }
 }
@@ -196,20 +186,11 @@ impl From<&LookupIpOptions> for LookupOptions {
 async fn lookup_ip(
     server: &NameServerGroup,
     name: Name,
-    options: &LookupIpOptions,
+    options: &LookupIpOptions<'_>,
 ) -> Result<DnsResponse, LookupError> {
     use ResponseMode::*;
 
     assert!(options.record_type.is_ip_addr());
-
-    let query_tasks = server
-        .iter()
-        .map(|ns| per_nameserver_lookup_ip(ns, name.clone(), options).boxed())
-        .collect::<Vec<_>>();
-
-    if query_tasks.is_empty() {
-        return Err(ProtoErrorKind::NoConnections.into());
-    }
 
     // ignore speed check
     let mut response_strategy = if options.no_speed_check || options.speed_check_mode.is_none() {
@@ -227,6 +208,19 @@ async fn lookup_ip(
     if speed_check_mode.iter().any(|m| m.is_none()) {
         response_strategy = FastestResponse; // ignore speed check
         speed_check_mode = &[];
+    }
+
+    if response_strategy == FastestResponse
+        && let [server] = server.servers.as_slice()
+    {
+        return per_nameserver_lookup_ip(server, name, options).await;
+    }
+    let query_tasks = server
+        .iter()
+        .map(|ns| per_nameserver_lookup_ip(ns, name.clone(), options).boxed())
+        .collect::<Vec<_>>();
+    if query_tasks.is_empty() {
+        return Err(ProtoErrorKind::NoConnections.into());
     }
 
     select_ip_response(name, response_strategy, speed_check_mode, query_tasks).await
@@ -277,6 +271,7 @@ async fn select_ip_response(
     let mut received_response = false;
     let mut ok_tasks = vec![];
     let mut err_tasks = vec![];
+    let mut probe_result = None;
 
     let selected_ip = match response_strategy {
         FirstPing => {
@@ -326,9 +321,6 @@ async fn select_ip_response(
                     Some(v) => match v {
                         Ok(lookup) => {
                             let ip_addrs = lookup.ip_addrs();
-                            if ip_addrs.len() == 1 {
-                                return Ok(lookup);
-                            }
                             ok_tasks.push(lookup);
                             if !ip_addrs.is_empty() {
                                 ping_tasks.push(
@@ -350,7 +342,10 @@ async fn select_ip_response(
             }
 
             match fastest_ip {
-                Some(ip) => Some(ip),
+                Some(out) => {
+                    probe_result = Some(out.elapsed());
+                    Some(out.dest().ip_addr())
+                }
                 None => {
                     let ip_addr_stats = ok_tasks.iter().flat_map(|r| r.ip_addrs()).fold(
                         HashMap::<IpAddr, usize>::new(),
@@ -447,7 +442,10 @@ async fn select_ip_response(
             }
 
             match fastest_ip {
-                Some(fastest_ip) => Some(fastest_ip.dest().ip_addr()),
+                Some(fastest_ip) => {
+                    probe_result = Some(fastest_ip.elapsed());
+                    Some(fastest_ip.dest().ip_addr())
+                }
                 None => ip_addr_stats
                     .into_iter()
                     .max_by_key(|(_, n)| *n)
@@ -481,7 +479,9 @@ async fn select_ip_response(
                 // original name on cold lookups as it already does from cache.
                 record.set_name(name.clone());
                 res.add_answer(record);
-                return Ok(res);
+                return Ok(res.with_probe_result(
+                    probe_result.map_or(ProbeResult::Failed, ProbeResult::Measured),
+                ));
             }
         }
         unreachable!()
@@ -500,7 +500,7 @@ async fn multi_mode_ping_fastest(
     name: Name,
     ip_addrs: Vec<IpAddr>,
     modes: Vec<SpeedCheckMode>,
-) -> Option<IpAddr> {
+) -> Option<PingOutput> {
     use crate::infra::ping::{PingOptions, ping_fastest};
     let duration = Duration::from_millis(200);
     let ping_ops = PingOptions::default().with_timeout_secs(2);
@@ -525,7 +525,7 @@ async fn multi_mode_ping_fastest(
                             ip,
                             ping_out.elapsed()
                         );
-                        fastest_ip = Some(ip);
+                        fastest_ip = Some(ping_out);
                         break;
                     }
                     Err(_) => continue,
@@ -585,7 +585,7 @@ async fn multi_mode_ping(
 async fn per_nameserver_lookup_ip(
     server: &NameServer,
     name: Name,
-    options: &LookupIpOptions,
+    options: &LookupIpOptions<'_>,
 ) -> Result<DnsResponse, LookupError> {
     assert!(options.lookup_options.record_type.is_ip_addr());
 
@@ -770,14 +770,16 @@ mod tests {
                     .unwrap();
             });
             let name: Name = "alias.example.".parse().unwrap();
+            let empty_ips = IpSet::default();
+            let empty_aliases = IpMap::default();
             let options = LookupIpOptions {
                 response_strategy: ResponseMode::FastestResponse,
                 speed_check_mode: None,
                 no_speed_check: true,
-                ignore_ip: Default::default(),
-                whitelist_ip: Default::default(),
-                blacklist_ip: Default::default(),
-                ip_alias: Default::default(),
+                ignore_ip: &empty_ips,
+                whitelist_ip: &empty_ips,
+                blacklist_ip: &empty_ips,
+                ip_alias: &empty_aliases,
                 lookup_options: LookupOptions {
                     record_type,
                     ..Default::default()

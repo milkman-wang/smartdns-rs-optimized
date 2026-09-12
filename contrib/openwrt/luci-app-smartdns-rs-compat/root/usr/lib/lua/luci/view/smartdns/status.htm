@@ -1,0 +1,11 @@
+<div class="cbi-section" id="smartdns-status"><%:Collecting data ...%></div>
+<script type="text/javascript">
+XHR.poll(2, '<%=luci.dispatcher.build_url("admin", "services", "smartdns", "status")%>', null,
+	function(xhr, data) {
+		var node = document.getElementById('smartdns-status');
+		if (node && data) {
+			node.textContent = 'SmartDNS-rs - ' + (data.running ? '<%:RUNNING%>' : '<%:NOT RUNNING%>');
+			node.style.color = data.running ? 'green' : 'red';
+		}
+	});
+</script>

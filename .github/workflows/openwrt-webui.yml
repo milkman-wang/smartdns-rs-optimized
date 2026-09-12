@@ -1,0 +1,43 @@
+name: OpenWrt WebUI packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish this variant after every architecture succeeds
+        required: true
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'src/**'
+      - 'contrib/openwrt/**'
+      - '.github/workflows/openwrt*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'src/**'
+      - 'contrib/openwrt/**'
+      - '.github/workflows/openwrt*.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: openwrt-webui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    uses: ./.github/workflows/openwrt-build.yml
+    with:
+      variant: webui
+      publish: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}

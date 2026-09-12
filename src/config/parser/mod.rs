@@ -23,6 +23,7 @@ mod ip_net;
 mod ip_set;
 mod iporset;
 // mod line;
+mod certificate;
 mod log_level;
 mod nameserver;
 mod nftset;
@@ -35,6 +36,7 @@ mod response_mode;
 mod speed_mode;
 mod srv;
 mod svcb;
+mod txt;
 
 use super::*;
 
@@ -53,6 +55,12 @@ impl NomParser for usize {
     #[inline]
     fn parse(input: &str) -> IResult<&str, Self> {
         map(u64, |v| v as usize).parse(input)
+    }
+}
+
+impl NomParser for isize {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        map_res(i64, isize::try_from).parse(input)
     }
 }
 
@@ -76,6 +84,12 @@ impl NomParser for String {
     }
 }
 
+impl NomParser for std::net::SocketAddr {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        map_res(is_not(" \t\r\n"), str::parse).parse(input)
+    }
+}
+
 /// one line config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -91,11 +105,28 @@ pub enum ConfigItem {
     BindCertFile(PathBuf),
     BindCertKeyFile(PathBuf),
     BindCertKeyPass(String),
+    BindCertGenerate(CertificateGeneration),
+    BindCertSan(Vec<String>),
+    BindCertValidityDays(u64),
+    BindCertRootKeyFile(PathBuf),
+    LogSyslog(bool),
+    AuditSoa(bool),
+    AuditConsole(bool),
+    AuditSyslog(bool),
+    DebugSaveFailPacket(bool),
+    DebugSaveFailPacketDir(PathBuf),
     BlacklistIp(IpOrSet),
     BogusNxDomain(IpOrSet),
     CacheFile(PathBuf),
     CachePersist(bool),
-    CacheSize(usize),
+    CacheSize(isize),
+    CacheMemorySize(Byte),
+    ServeExpiredPrefetchTime(u64),
+    MaxQueryLimit(usize),
+    WebUiEnable(bool),
+    WebUiBind(std::net::SocketAddr),
+    OdhcpdLeaseFile(PathBuf),
+    TxtRecord(ConfigForDomain<TXT>),
     CacheCheckpointTime(u64),
     CaFile(PathBuf),
     CaPath(PathBuf),
@@ -134,6 +165,12 @@ pub enum ConfigItem {
     MaxReplyIpNum(u8),
     MdnsLookup(bool),
     NftSet(ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>),
+    KernelIpSet(ConfigForDomain<Vec<ConfigForIP<KernelIpSet>>>),
+    IpSetTimeout(bool),
+    NftSetTimeout(bool),
+    IpSetNoSpeed(Vec<ConfigForIP<KernelIpSet>>),
+    NftSetNoSpeed(Vec<ConfigForIP<NFTsetConfig>>),
+    NftSetDebug(bool),
     NumWorkers(usize),
     PrefetchDomain(bool),
     ProxyConfig(NamedProxyConfig),
@@ -160,6 +197,29 @@ pub enum ConfigItem {
 impl std::fmt::Display for ConfigItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ConfigItem::LogSyslog(v) => write!(f, "log-syslog {v}")?,
+            ConfigItem::AuditSoa(v) => write!(f, "audit-SOA {v}")?,
+            ConfigItem::AuditConsole(v) => write!(f, "audit-console {v}")?,
+            ConfigItem::AuditSyslog(v) => write!(f, "audit-syslog {v}")?,
+            ConfigItem::DebugSaveFailPacket(v) => write!(f, "debug-save-fail-packet {v}")?,
+            ConfigItem::DebugSaveFailPacketDir(v) => {
+                write!(f, "debug-save-fail-packet-dir {}", v.display())?
+            }
+            ConfigItem::BindCertGenerate(v) => write!(f, "bind-cert-generate {v:?}")?,
+            ConfigItem::BindCertSan(v) => write!(f, "bind-cert-san {}", v.join(" "))?,
+            ConfigItem::BindCertValidityDays(v) => write!(f, "bind-cert-validity-days {v}")?,
+            ConfigItem::BindCertRootKeyFile(v) => {
+                write!(f, "bind-cert-root-key-file {}", v.display())?
+            }
+            ConfigItem::CacheMemorySize(v) => write!(f, "cache-mem-size {v}")?,
+            ConfigItem::ServeExpiredPrefetchTime(v) => {
+                write!(f, "serve-expired-prefetch-time {v}")?
+            }
+            ConfigItem::MaxQueryLimit(v) => write!(f, "max-query-limit {v}")?,
+            ConfigItem::WebUiEnable(v) => write!(f, "webui-enable {v}")?,
+            ConfigItem::WebUiBind(v) => write!(f, "webui-bind {v}")?,
+            ConfigItem::OdhcpdLeaseFile(v) => write!(f, "odhcpd-lease-file {}", v.display())?,
+            ConfigItem::TxtRecord(v) => write!(f, "txt-record /{}/{}", v.domain, v.config)?,
             ConfigItem::Address(rule) => {
                 write!(f, "address {rule}")?;
             }
@@ -215,6 +275,12 @@ impl std::fmt::Display for ConfigItem {
             ConfigItem::MaxReplyIpNum(_) => todo!(),
             ConfigItem::MdnsLookup(_) => todo!(),
             ConfigItem::NftSet(_) => todo!(),
+            ConfigItem::KernelIpSet(v) => write!(f, "ipset {:?}", v)?,
+            ConfigItem::IpSetTimeout(v) => write!(f, "ipset-timeout {v}")?,
+            ConfigItem::NftSetTimeout(v) => write!(f, "nftset-timeout {v}")?,
+            ConfigItem::IpSetNoSpeed(v) => write!(f, "ipset-no-speed {:?}", v)?,
+            ConfigItem::NftSetNoSpeed(v) => write!(f, "nftset-no-speed {:?}", v)?,
+            ConfigItem::NftSetDebug(v) => write!(f, "nftset-debug {v}")?,
             ConfigItem::NumWorkers(_) => todo!(),
             ConfigItem::PrefetchDomain(_) => todo!(),
             ConfigItem::ProxyConfig(_) => todo!(),
@@ -423,7 +489,49 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, ConfigLine<'a>> {
         map(NomParser::parse, ConfigItem::Server),
     ));
 
-    let group = alt((group1, group2, group3, group4, group5));
+    let group6 = alt((
+        map(config("ipset"), ConfigItem::KernelIpSet),
+        map(config("ipset-timeout"), ConfigItem::IpSetTimeout),
+        map(config("nftset-timeout"), ConfigItem::NftSetTimeout),
+        map(config("ipset-no-speed"), ConfigItem::IpSetNoSpeed),
+        map(config("nftset-no-speed"), ConfigItem::NftSetNoSpeed),
+        map(config("nftset-debug"), ConfigItem::NftSetDebug),
+        map(config("cache-mem-size"), ConfigItem::CacheMemorySize),
+        map(
+            config("serve-expired-prefetch-time"),
+            ConfigItem::ServeExpiredPrefetchTime,
+        ),
+        map(config("max-query-limit"), ConfigItem::MaxQueryLimit),
+        map(config("webui-enable"), ConfigItem::WebUiEnable),
+        map(config("webui-bind"), ConfigItem::WebUiBind),
+        map(config("odhcpd-lease-file"), ConfigItem::OdhcpdLeaseFile),
+        map(config("txt-record"), ConfigItem::TxtRecord),
+    ));
+    let group7 = alt((
+        map(config("log-syslog"), ConfigItem::LogSyslog),
+        map(config("audit-SOA"), ConfigItem::AuditSoa),
+        map(config("audit-console"), ConfigItem::AuditConsole),
+        map(config("audit-syslog"), ConfigItem::AuditSyslog),
+        map(
+            config("debug-save-fail-packet-dir"),
+            ConfigItem::DebugSaveFailPacketDir,
+        ),
+        map(
+            config("debug-save-fail-packet"),
+            ConfigItem::DebugSaveFailPacket,
+        ),
+        map(config("bind-cert-generate"), ConfigItem::BindCertGenerate),
+        map(config("bind-cert-san"), ConfigItem::BindCertSan),
+        map(
+            config("bind-cert-validity-days"),
+            ConfigItem::BindCertValidityDays,
+        ),
+        map(
+            config("bind-cert-root-key-file"),
+            ConfigItem::BindCertRootKeyFile,
+        ),
+    ));
+    let group = alt((group1, group2, group3, group4, group5, group6, group7));
 
     alt((
         map(
@@ -470,7 +578,7 @@ mod tests {
                 ConfigItem::NftSet(ConfigForDomain {
                     domain: Domain::Name("www.example.com".parse().unwrap()),
                     config: vec![ConfigForIP::V4(NFTsetConfig {
-                        family: "inet",
+                        family: "inet".to_string(),
                         table: "tab".to_string(),
                         name: "dns4".to_string()
                     })]
@@ -486,7 +594,7 @@ mod tests {
                 ConfigItem::NftSet(ConfigForDomain {
                     domain: Domain::Name("www.example.com".parse().unwrap()),
                     config: vec![ConfigForIP::V4(NFTsetConfig {
-                        family: "inet",
+                        family: "inet".to_string(),
                         table: "tab".to_string(),
                         name: "dns4".to_string()
                     })]

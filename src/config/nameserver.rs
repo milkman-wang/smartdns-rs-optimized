@@ -71,6 +71,10 @@ pub struct NameServerInfo {
     #[serde(default = "Default::default")]
     pub check_edns: bool,
 
+    /// Base64-encoded SHA-256 digest of the peer's SubjectPublicKeyInfo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spki_pin: Option<String>,
+
     /// exclude this server from default group.
     /// ```
     /// example:
@@ -166,6 +170,7 @@ impl From<DnsUrl> for NameServerInfo {
             whitelist_ip: Default::default(),
             bootstrap_dns: Default::default(),
             check_edns: Default::default(),
+            spki_pin: None,
             proxy: Default::default(),
             interface: Default::default(),
             so_mark: Default::default(),

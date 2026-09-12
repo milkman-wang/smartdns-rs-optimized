@@ -10,7 +10,7 @@ PKG_SOURCE_VERSION:=98b299ae46afc2c38be458dcce9a8ce119b00f6b
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_SOURCE_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/milkman-wang/smartdns-rs/tar.gz/$(PKG_SOURCE_VERSION)?
 PKG_HASH:=ffb9b8f51d23885c585ffb8225743fe530a0c28a3d6e351229246c2c8c6f8ec4
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_SOURCE_VERSION)
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)$(if $(BUILD_VARIANT),-$(BUILD_VARIANT))/$(PKG_NAME)-$(PKG_SOURCE_VERSION)
 
 PKG_MAINTAINER:=SmartDNS-rs contributors
 PKG_LICENSE:=GPL-3.0-only
@@ -21,6 +21,9 @@ PKG_BUILD_PARALLEL:=1
 # Avoid desktop-only service management, the resolver CLI, and self-update.
 # The protocol and nftables features below are the OpenWrt runtime surface.
 RUST_PKG_FEATURES:=dns-over-tls,dns-over-https,dns-over-quic,dns-over-h3,mdns,dnssec,nft,nom-recipes-all,http_client,serde
+ifeq ($(BUILD_VARIANT),webui)
+  RUST_PKG_FEATURES+=webui
+endif
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -34,7 +37,6 @@ ifeq ($(RUSTC_TARGET_ARCH),i586-unknown-linux-musl)
   CARGO_RUSTFLAGS+=-Ctarget-feature=+sse,+sse2
 endif
 
-CARGO_PKG_VARS+=SMARTDNS_OPENWRT=1
 # rust-values.mk overrides Cargo.toml with opt-level=z. Put this assignment
 # after the SDK variables so release packages retain the measured speed gain.
 CARGO_PKG_VARS+=CARGO_PROFILE_RELEASE_OPT_LEVEL=3
@@ -44,11 +46,27 @@ define Package/smartdns-rs
   SECTION:=net
   CATEGORY:=Network
   SUBMENU:=IP Addresses and Names
-  TITLE:=SmartDNS-rs DNS server
+  TITLE:=SmartDNS-rs DNS server (headless)
+  VARIANT:=headless
+  DEFAULT_VARIANT:=1
   URL:=https://github.com/milkman-wang/smartdns-rs
   PROVIDES:=smartdns
-  CONFLICTS:=smartdns
+  CONFLICTS:=smartdns smartdns-rs-webui
   DEPENDS:=$(RUST_ARCH_DEPENDS) +ca-bundle
+endef
+
+define Package/smartdns-rs-webui
+  $(call Package/smartdns-rs)
+  TITLE:=SmartDNS-rs DNS server with Rust WebUI
+  VARIANT:=webui
+  DEFAULT_VARIANT:=
+  PROVIDES:=smartdns smartdns-rs
+  CONFLICTS:=smartdns smartdns-rs
+endef
+
+define Package/smartdns-rs-webui/description
+SmartDNS-rs with its optional Rust management UI. The DNS engine and WebUI are
+compiled into one executable; no C plugin or separate web server is required.
 endef
 
 define Package/smartdns-rs/description
@@ -64,6 +82,10 @@ define Package/smartdns-rs/conffiles
 /etc/smartdns/custom.conf
 /etc/smartdns/domain-block.list
 /etc/smartdns/domain-forwarding.list
+endef
+
+define Package/smartdns-rs-webui/conffiles
+$(call Package/smartdns-rs/conffiles)
 endef
 
 define Package/smartdns-rs/install
@@ -84,5 +106,12 @@ define Package/smartdns-rs/install
 	$(INSTALL_CONF) ./files/etc/smartdns/domain-forwarding.list $(1)/etc/smartdns/domain-forwarding.list
 endef
 
+define Package/smartdns-rs-webui/install
+	$(call Package/smartdns-rs/install,$(1))
+	$(SED) "/option port '6053'/a\	option webui_enable '1'\n\	option webui_bind '0.0.0.0:6080'" $(1)/etc/config/smartdns
+endef
+
 $(eval $(call RustBinPackage,smartdns-rs))
 $(eval $(call BuildPackage,smartdns-rs))
+$(eval $(call RustBinPackage,smartdns-rs-webui))
+$(eval $(call BuildPackage,smartdns-rs-webui))

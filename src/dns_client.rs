@@ -20,14 +20,14 @@ use crate::{
 
 use crate::libdns::{
     proto::{
-        DnsHandle, ProtoError,
-        op::{Edns, Message, Query},
+        ProtoError,
+        op::{Edns, Query},
         rr::{
             Record, RecordType,
             domain::{IntoName, Name},
             rdata::opt::{ClientSubnet, EdnsOption},
         },
-        xfer::{DnsRequest, DnsRequestOptions, FirstAnswer},
+        xfer::DnsRequestOptions,
     },
     resolver::config::{ResolverOpts, ServerOrderingStrategy},
 };
@@ -254,7 +254,7 @@ impl DnsClient {
 
     pub async fn lookup_nameserver(
         &self,
-        name: Name,
+        name: &Name,
         record_type: RecordType,
     ) -> Option<DnsResponse> {
         self.bootstrap.local_lookup(name, record_type).await
@@ -428,7 +428,6 @@ mod name_server_group {
         }
     }
 
-    #[async_trait::async_trait]
     impl GenericResolver for NameServerGroup {
         fn options(&self) -> &ResolverOpts {
             &self.resolver_opts
@@ -441,11 +440,20 @@ mod name_server_group {
         ) -> Result<DnsResponse, LookupError> {
             let name = name.into_name()?;
             let options: LookupOptions = options.into();
+            if let [server] = self.servers.as_slice() {
+                return server.lookup(name, options).await;
+            }
             let prefer_nonempty = options.record_type.is_ip_addr();
             let tasks = self
                 .servers
                 .iter()
-                .map(|ns| GenericResolver::lookup(ns.as_ref(), name.clone(), options.clone()))
+                .map(|ns| {
+                    Box::pin(GenericResolver::lookup(
+                        ns.as_ref(),
+                        name.clone(),
+                        options.clone(),
+                    ))
+                })
                 .collect::<Vec<_>>();
 
             select_response(tasks, prefer_nonempty).await
@@ -455,14 +463,23 @@ mod name_server_group {
 
 mod name_server {
     use super::*;
-    use crate::libdns::custom::{
-        connection_provider::{Connection, ConnectionProvider},
-        warmup::DnsHandleWarmpup,
-    };
+    use crate::libdns::custom::connection_provider::Connection;
 
     pub struct NameServer {
         options: Arc<NameServerOpts>,
         connection: Connection,
+        statistics: Arc<crate::stats::Upstream>,
+    }
+
+    impl Drop for NameServer {
+        fn drop(&mut self) {
+            self.statistics
+                .registered
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.statistics
+                .alive
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     impl NameServer {
@@ -474,6 +491,7 @@ mod name_server {
             default_client_subnet: Option<ClientSubnet>,
         ) -> anyhow::Result<Self> {
             let url = &config.server;
+            let statistics = crate::stats::Upstream::new(config.clone());
 
             if !url.has_ip() && resolver.is_none() {
                 anyhow::bail!("Parameter resolver is required for non-ip upstream");
@@ -484,15 +502,11 @@ mod name_server {
                     anyhow::bail!("Parameter tls_client_config is required for Encrypted upstream");
                 };
 
-                let config = if !url.ssl_verify() {
-                    tls_client_config.verify_off
-                } else if url.sni_off() {
-                    tls_client_config.sni_off
-                } else {
-                    tls_client_config.normal
-                };
-
-                Some(config)
+                Some(tls_client_config.for_upstream(
+                    url.ssl_verify(),
+                    !url.sni_off(),
+                    config.spki_pin.as_deref(),
+                )?)
             } else {
                 None
             };
@@ -518,7 +532,7 @@ mod name_server {
             let so_mark = config.so_mark;
             let device = config.interface;
 
-            let connection = ConnectionProvider::new(
+            let connection = Connection::new(
                 config.server,
                 Arc::new(options.deref().clone()),
                 resolver,
@@ -530,6 +544,7 @@ mod name_server {
             Ok(Self {
                 options: options.into(),
                 connection,
+                statistics,
             })
         }
 
@@ -544,7 +559,6 @@ mod name_server {
         }
     }
 
-    #[async_trait::async_trait]
     impl GenericResolver for NameServer {
         fn options(&self) -> &ResolverOpts {
             &self.options().resolver_opts
@@ -582,65 +596,55 @@ mod name_server {
                 request_opts
             };
 
-            let req = DnsRequest::new(
-                build_message(query, request_options, client_subnet, options.is_dnssec),
-                request_options,
-            );
+            let edns = build_edns(request_options, client_subnet, options.is_dnssec);
 
-            let res = {
+            let started = std::time::Instant::now();
+            self.statistics
+                .stats
+                .total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let response = {
                 let ns = &self.connection;
-                ns.send(req).first_answer().await?
+                ns.lookup(&query, request_options, edns.as_ref()).await
             };
+            self.statistics.completed(&response, started.elapsed());
+            let res = response?;
 
-            Ok(From::<Message>::from(res.into()))
+            if self.options().check_edns && res.extensions().is_none() {
+                return Err(ProtoError::from("upstream reply has no required EDNS record").into());
+            }
+
+            Ok(res)
         }
-    }
-
-    struct ClientHandle {
-        connection: Arc<Connection>,
     }
 
     /// > An EDNS buffer size of 1232 bytes will avoid fragmentation on nearly all current networks.
     /// > https://dnsflagday.net/2020/
     const MAX_PAYLOAD_LEN: u16 = 1232;
 
-    fn build_message(
-        query: Query,
+    fn build_edns(
         request_options: DnsRequestOptions,
         client_subnet: Option<ClientSubnet>,
         is_dnssec: bool,
-    ) -> Message {
-        // build the message
-
-        let mut message = Message::query();
-        // TODO: This is not the final ID, it's actually set in the poll method of DNS future
-        message
-            .add_query(query)
-            .set_recursion_desired(request_options.recursion_desired);
-
-        // Extended dns
-        if client_subnet.is_some() || request_options.use_edns || is_dnssec {
-            message
-                .extensions_mut()
-                .get_or_insert_with(Edns::new)
-                .set_max_payload(MAX_PAYLOAD_LEN)
-                .set_version(0);
-
-            if let (Some(client_subnet), Some(edns)) = (client_subnet, message.extensions_mut()) {
-                edns.options_mut().insert(EdnsOption::Subnet(client_subnet));
-            }
-
-            if let (true, Some(edns)) = (is_dnssec, message.extensions_mut()) {
-                edns.set_dnssec_ok(is_dnssec);
-            }
+    ) -> Option<Edns> {
+        if !request_options.use_edns && client_subnet.is_none() && !is_dnssec {
+            return None;
         }
-        message
+        let mut edns = Edns::new();
+        edns.set_max_payload(MAX_PAYLOAD_LEN)
+            .set_version(0)
+            .set_dnssec_ok(is_dnssec);
+        if let Some(subnet) = client_subnet {
+            edns.options_mut().insert(EdnsOption::Subnet(subnet));
+        }
+        Some(edns)
     }
 }
 
 mod bootstrap {
     use super::*;
     use crate::{dns_url::DnsUrl, libdns::resolver::config::ResolverConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub struct BootstrapResolver<T: GenericResolver = NameServerGroup>
     where
@@ -648,6 +652,7 @@ mod bootstrap {
     {
         resolver: Arc<T>,
         ip_store: RwLock<HashMap<Query, Arc<[Record]>>>,
+        has_records: AtomicBool,
     }
 
     impl<T: GenericResolver + Sync + Send> BootstrapResolver<T> {
@@ -655,6 +660,7 @@ mod bootstrap {
             Self {
                 resolver,
                 ip_store: Default::default(),
+                has_records: AtomicBool::new(false),
             }
         }
 
@@ -662,15 +668,21 @@ mod bootstrap {
             Self {
                 resolver,
                 ip_store: self.ip_store,
+                has_records: self.has_records,
             }
         }
 
         pub async fn local_lookup(
             &self,
-            name: Name,
+            name: &Name,
             record_type: RecordType,
         ) -> Option<DnsResponse> {
-            let query = Query::query(name.clone(), record_type);
+            if !self.has_records.load(Ordering::Acquire) {
+                return None;
+            }
+            let mut name = name.clone();
+            name.set_fqdn(true);
+            let query = Query::query(name, record_type);
             let store = self.ip_store.read().await;
 
             let lookup = store.get(&query).cloned();
@@ -720,7 +732,6 @@ mod bootstrap {
         }
     }
 
-    #[async_trait::async_trait]
     impl<T: GenericResolver + Sync + Send> GenericResolver for BootstrapResolver<T> {
         fn options(&self) -> &ResolverOpts {
             self.resolver.options()
@@ -735,7 +746,7 @@ mod bootstrap {
             let name = name.into_name()?;
             let options: LookupOptions = options.into();
             let record_type = options.record_type;
-            if let Some(lookup) = self.local_lookup(name.clone(), record_type).await {
+            if let Some(lookup) = self.local_lookup(&name, record_type).await {
                 return Ok(lookup);
             }
 
@@ -764,6 +775,7 @@ mod bootstrap {
                         ),
                         records.into(),
                     );
+                    self.has_records.store(true, Ordering::Release);
 
                     Ok(lookup)
                 }
@@ -785,7 +797,6 @@ mod bootstrap {
     }
 }
 
-#[async_trait::async_trait]
 pub trait GenericResolver {
     fn options(&self) -> &ResolverOpts;
 
@@ -799,14 +810,13 @@ pub trait GenericResolver {
     /// # Returns
     ///
     ///  A future for the returned Lookup RData
-    async fn lookup<N: IntoName + Send, O: Into<LookupOptions> + Send + Clone>(
+    fn lookup<N: IntoName + Send, O: Into<LookupOptions> + Send + Clone>(
         &self,
         name: N,
         options: O,
-    ) -> Result<DnsResponse, LookupError>;
+    ) -> impl std::future::Future<Output = Result<DnsResponse, LookupError>> + Send;
 }
 
-#[async_trait::async_trait]
 pub trait GenericResolverExt {
     /// Performs a dual-stack DNS lookup for the IP for the given hostname.
     ///
@@ -814,10 +824,12 @@ pub trait GenericResolverExt {
     ///
     /// # Arguments
     /// * `host` - string hostname, if this is an invalid hostname, an error will be returned.
-    async fn lookup_ip<N: IntoName + Send>(&self, host: N) -> Result<DnsResponse, LookupError>;
+    fn lookup_ip<N: IntoName + Send>(
+        &self,
+        host: N,
+    ) -> impl std::future::Future<Output = Result<DnsResponse, LookupError>> + Send;
 }
 
-#[async_trait::async_trait]
 impl<T> GenericResolverExt for T
 where
     T: GenericResolver + Sync,
@@ -868,12 +880,9 @@ where
             Ipv6Only => self.lookup(name.clone(), RecordType::AAAA).await,
             Ipv4AndIpv6 => {
                 use futures_util::future::{Either, select};
-                match select(
-                    self.lookup(name.clone(), RecordType::A),
-                    self.lookup(name.clone(), RecordType::AAAA),
-                )
-                .await
-                {
+                let ipv4 = std::pin::pin!(self.lookup(name.clone(), RecordType::A));
+                let ipv6 = std::pin::pin!(self.lookup(name, RecordType::AAAA));
+                match select(ipv4, ipv6).await {
                     Either::Left((res, _)) => res,
                     Either::Right((res, _)) => res,
                 }
@@ -894,6 +903,7 @@ where
 mod tests {
 
     use super::*;
+    use crate::libdns::proto::op::Message;
     use crate::{
         dns_url::DnsUrl,
         libdns::proto::{AuthorityData, ProtoErrorKind, op::ResponseCode},
@@ -902,6 +912,111 @@ mod tests {
     };
     use std::net::IpAddr;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn bootstrap_cache_normalizes_names_and_survives_resolver_replacement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Resolver {
+            options: ResolverOpts,
+            calls: AtomicUsize,
+        }
+        impl GenericResolver for Resolver {
+            fn options(&self) -> &ResolverOpts {
+                &self.options
+            }
+
+            async fn lookup<N: IntoName + Send, O: Into<LookupOptions> + Send + Clone>(
+                &self,
+                name: N,
+                options: O,
+            ) -> Result<DnsResponse, LookupError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DnsResponse::from_rdata(
+                    Query::query(name.into_name()?, options.into().record_type),
+                    "192.0.2.7".parse::<IpAddr>().unwrap().into(),
+                ))
+            }
+        }
+
+        let upstream = Arc::new(Resolver::default());
+        let bootstrap = BootstrapResolver::new(upstream.clone());
+        let name = "bootstrap.example".parse().unwrap();
+        assert!(bootstrap.local_lookup(&name, RecordType::A).await.is_none());
+        for spelling in [
+            "bootstrap.example",
+            "bootstrap.example.",
+            "BOOTSTRAP.EXAMPLE",
+        ] {
+            let response = bootstrap.lookup(spelling, RecordType::A).await.unwrap();
+            assert_eq!(
+                response.ip_addrs(),
+                ["192.0.2.7".parse::<IpAddr>().unwrap()]
+            );
+        }
+        assert_eq!(upstream.calls.load(Ordering::Relaxed), 1);
+        assert!(
+            bootstrap
+                .local_lookup(&name, RecordType::AAAA)
+                .await
+                .is_none()
+        );
+        let replacement = Arc::new(Resolver::default());
+        let bootstrap = bootstrap.with_new_resolver(replacement.clone());
+        let response = bootstrap.lookup(name, RecordType::A).await.unwrap();
+        assert_eq!(
+            response.ip_addrs(),
+            ["192.0.2.7".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(replacement.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_c_compat_check_edns_rejects_missing_opt() {
+        use crate::{config::NameServerInfo, libdns::proto::rr::RData};
+        for (require_edns, reply_edns) in [(false, false), (true, false), (true, true)] {
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut config = NameServerInfo::from(
+                format!("udp://{}", socket.local_addr().unwrap())
+                    .parse::<DnsUrl>()
+                    .unwrap(),
+            );
+            config.check_edns = require_edns;
+            let server = NameServer::new(config, None, None, None, None).unwrap();
+            let upstream = tokio::spawn(async move {
+                let mut bytes = [0; 4096];
+                let (len, peer) = socket.recv_from(&mut bytes).await.unwrap();
+                let request = Message::from_vec(&bytes[..len]).unwrap();
+                let query = request.queries()[0].clone();
+                let mut response = Message::response(request.id(), request.op_code());
+                response.set_recursion_available(true);
+                response.add_query(query.clone());
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    30,
+                    RData::A("192.0.2.1".parse().unwrap()),
+                ));
+                if reply_edns {
+                    response.set_edns(Edns::new());
+                }
+                socket
+                    .send_to(&response.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            });
+            let result = server.lookup("edns.example.", RecordType::A).await;
+            if require_edns && !reply_edns {
+                assert!(result.unwrap_err().to_string().contains("required EDNS"));
+            } else {
+                assert_eq!(
+                    result.unwrap().ip_addrs(),
+                    vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+                );
+            }
+            upstream.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn test_query_non_ip_upstream_failure_does_not_hide_success() {

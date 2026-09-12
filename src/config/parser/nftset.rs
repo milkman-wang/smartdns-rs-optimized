@@ -24,7 +24,7 @@ impl NomParser for NFTsetConfig {
         Ok((
             input,
             NFTsetConfig {
-                family,
+                family: family.to_string(),
                 table: table.to_string(),
                 name: name.to_string(),
             },
@@ -49,10 +49,42 @@ impl NomParser for ConfigForIP<NFTsetConfig> {
         );
 
         alt((
+            value(ConfigForIP::NoneV4, tag("#4:-")),
+            value(ConfigForIP::NoneV6, tag("#6:-")),
             map(char('-'), |_| ConfigForIP::None),
             map(v4, ConfigForIP::V4),
             map(v6, ConfigForIP::V6),
         ))
+        .parse(input)
+    }
+}
+
+impl NomParser for KernelIpSet {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        map(
+            verify(
+                take_while1(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
+                |s: &str| s.len() < 32,
+            ),
+            |s: &str| KernelIpSet(s.to_string()),
+        )
+        .parse(input)
+    }
+}
+
+impl NomParser for Vec<ConfigForIP<KernelIpSet>> {
+    fn parse(input: &str) -> IResult<&str, Self> {
+        separated_list1(
+            (space0, char(','), space0),
+            alt((
+                value(ConfigForIP::NoneV4, tag("#4:-")),
+                value(ConfigForIP::NoneV6, tag("#6:-")),
+                value(ConfigForIP::None, char('-')),
+                map(preceded(tag("#4:"), KernelIpSet::parse), ConfigForIP::V4),
+                map(preceded(tag("#6:"), KernelIpSet::parse), ConfigForIP::V6),
+                map(KernelIpSet::parse, ConfigForIP::All),
+            )),
+        )
         .parse(input)
     }
 }
@@ -78,7 +110,7 @@ mod tests {
             (
                 "",
                 NFTsetConfig {
-                    family: "inet",
+                    family: "inet".to_string(),
                     table: "tab1".to_string(),
                     name: "dns_4".to_string()
                 }
@@ -90,7 +122,7 @@ mod tests {
             (
                 "",
                 NFTsetConfig {
-                    family: "inet",
+                    family: "inet".to_string(),
                     table: "tab1".to_string(),
                     name: "dns4".to_string()
                 }
@@ -102,7 +134,7 @@ mod tests {
             (
                 "",
                 NFTsetConfig {
-                    family: "ip6",
+                    family: "ip6".to_string(),
                     table: "tab1".to_string(),
                     name: "dns6".to_string()
                 }
@@ -113,7 +145,7 @@ mod tests {
             (
                 "",
                 NFTsetConfig {
-                    family: "inet",
+                    family: "inet".to_string(),
                     table: "fw-4".to_string(),
                     name: "smartdns-v4".to_string()
                 }
@@ -128,7 +160,7 @@ mod tests {
             (
                 "",
                 ConfigForIP::V4(NFTsetConfig {
-                    family: "inet",
+                    family: "inet".to_string(),
                     table: "tab".to_string(),
                     name: "dns4".to_string(),
                 })
@@ -140,7 +172,7 @@ mod tests {
             (
                 "",
                 ConfigForIP::V6(NFTsetConfig {
-                    family: "ip6",
+                    family: "ip6".to_string(),
                     table: "tab".to_string(),
                     name: "dns6".to_string(),
                 })

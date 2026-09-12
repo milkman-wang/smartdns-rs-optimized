@@ -60,6 +60,9 @@ impl NomParser for DomainRule {
             map(parse_value(tag_no_case("nftset"), NomParser::parse), |v| {
                 rule.nftset = Some(v);
             }),
+            map(parse_value(tag_no_case("ipset"), NomParser::parse), |v| {
+                rule.ipset = Some(v);
+            }),
             map(
                 parse_value(
                     alt((tag_no_case("response-mode"), tag("r"))),
@@ -197,12 +200,12 @@ mod tests {
                 DomainRule {
                     nftset: Some(vec![
                         ConfigForIP::V4(NFTsetConfig {
-                            family: "ip",
+                            family: "ip".to_string(),
                             table: "fw4".to_string(),
                             name: "dns4".to_string(),
                         }),
                         ConfigForIP::V6(NFTsetConfig {
-                            family: "ip6",
+                            family: "ip6".to_string(),
                             table: "fw4".to_string(),
                             name: "dns6".to_string(),
                         }),

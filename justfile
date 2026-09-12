@@ -15,7 +15,8 @@ version := `cargo pkgid | cut -d@ -f2`
 diagnostic := ""
 bin_name := if os_family() == "windows" { name + ".exe" } else { name }
 dist_dir := "dist"
-dist_name := name + "-" + target
+flavor := "headless"
+dist_name := if flavor == "webui" { name + "-webui-" + target } else { name + "-" + target }
 dist_zip := if os() == "windows" { dist_name + "-v" + version + ".zip" } else if os() == "macos" { dist_name + "-v" + version + ".zip" } else { dist_name + "-v" + version + ".tar.gz" }
 
 
@@ -105,6 +106,7 @@ package-prepare:
   @mkdir -p {{dist_dir}}/{{dist_name}}
   cp LICENSE README*.md etc/smartdns/smartdns.conf  {{dist_dir}}/{{dist_name}}
   echo "Version: {{version}}" >  {{dist_dir}}/{{dist_name}}/version
+  echo "Variant: {{flavor}}" >> {{dist_dir}}/{{dist_name}}/version
   echo "Build date: $(date)" >>  {{dist_dir}}/{{dist_name}}/version
   echo "Branch: $(git rev-parse --abbrev-ref HEAD)" >>  {{dist_dir}}/{{dist_name}}/version
   echo "Commit: $(git rev-parse HEAD)" >>  {{dist_dir}}/{{dist_name}}/version

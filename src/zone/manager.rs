@@ -17,13 +17,13 @@ impl ZoneManager {
         self
     }
 
-    pub async fn lookup(
+    pub fn lookup(
         &self,
         ctx: &DnsContext,
         req: &DnsRequest,
     ) -> Result<Option<DnsResponse>, DnsError> {
         for provider in &self.providers {
-            if let Some(response) = provider.lookup(ctx, req).await? {
+            if let Some(response) = provider.lookup(ctx, req)? {
                 return Ok(Some(response));
             }
         }
