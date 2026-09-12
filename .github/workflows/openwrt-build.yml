@@ -140,7 +140,8 @@ jobs:
           ARCH: ${{ matrix.arch }}
           BUILD_LOG: 1
           NO_REFRESH_CHECK: 1
-          PACKAGES: ${{ env.CORE_PACKAGE }} luci-app-smartdns-rs luci-app-smartdns-rs-compat
+          # SDK targets use the source directory; release filtering selects the variant.
+          PACKAGES: smartdns-rs luci-app-smartdns-rs luci-app-smartdns-rs-compat
           V: s
 
       - name: Upload packages and logs
@@ -221,7 +222,7 @@ jobs:
           ARCH: ${{ matrix.arch }}-24.10.7
           BUILD_LOG: 1
           NO_REFRESH_CHECK: 1
-          PACKAGES: ${{ env.CORE_PACKAGE }} luci-app-smartdns-rs luci-app-smartdns-rs-compat
+          PACKAGES: smartdns-rs luci-app-smartdns-rs luci-app-smartdns-rs-compat
           V: s
 
       - name: Upload packages and logs

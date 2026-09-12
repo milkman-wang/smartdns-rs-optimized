@@ -52,7 +52,7 @@ define Package/smartdns-rs
   DEFAULT_VARIANT:=1
   URL:=https://github.com/milkman-wang/smartdns-rs-optimized
   PROVIDES:=smartdns
-  CONFLICTS:=smartdns smartdns-rs-webui
+  CONFLICTS:=smartdns
   DEPENDS:=$(RUST_ARCH_DEPENDS) +ca-bundle
 endef
 
@@ -62,6 +62,7 @@ define Package/smartdns-rs-webui
   VARIANT:=webui
   DEFAULT_VARIANT:=
   PROVIDES:=smartdns smartdns-rs
+  # Declare the variant conflict once; two directions create a Kconfig cycle.
   CONFLICTS:=smartdns smartdns-rs
 endef
 
