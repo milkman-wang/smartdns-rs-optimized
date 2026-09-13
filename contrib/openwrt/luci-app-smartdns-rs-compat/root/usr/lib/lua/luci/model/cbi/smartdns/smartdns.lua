@@ -451,56 +451,35 @@ o = s:option(Value, "desc", translate("Description"))
 o = s:option(Flag, "use_proxy", translate("Use Proxy"))
 
 s = m:section(TypedSection, "server", translate("Upstream DNS Servers"))
+s.template = "cbi/tblsection"
 s.anonymous = true
 s.addremove = true
 s.sortable = true
+function s.extedit(self, section)
+    return luci.dispatcher.build_url("admin", "services", "smartdns", "server", section)
+end
+function s.create(self, ...)
+    local section = TypedSection.create(self, ...)
+    if section then luci.http.redirect(self:extedit(section)) end
+    return section
+end
 
 o = s:option(Flag, "enabled", translate("Enable"))
 o.default = "1"
 
-o = s:option(Value, "name", translate("Name"))
-
-o = s:option(Value, "ip", translate("Address or URL"), translate("Enter an IP address, hostname, or a complete DNS URL. The separate port is ignored for complete URLs."))
-o.rmempty = false
-
-o = s:option(Value, "port", translate("Port"))
-o.datatype = "port"
-
-o = s:option(ListValue, "type", translate("Protocol"))
-o.default = "udp"
-o.rmempty = false
-o:value("udp", translate("UDP"))
-o:value("tcp", translate("TCP"))
-o:value("tls", translate("DNS over TLS"))
-o:value("https", translate("DNS over HTTPS"))
-o:value("quic", translate("DNS over QUIC"))
-o:value("h3", translate("DNS over HTTP/3"))
-
-o = s:option(Value, "server_group", translate("Server Group"))
-m.uci:foreach("smartdns", "server", function(server)
-	if server.server_group then o:value(server.server_group) end
-end)
-
-o = s:option(Flag, "exclude_default_group", translate("Exclude Default Group"))
-
-o = s:option(Flag, "blacklist_ip", translate("Blacklist IP Filtering"))
-
-o = s:option(Flag, "check_edns", translate("Require EDNS"))
-
-o = s:option(Value, "spki_pin", translate("TLS SPKI Pin (Base64 SHA-256)"))
-
-o = s:option(Value, "tls_host_verify", translate("TLS Hostname Verify"))
-
-o = s:option(Value, "host_name", translate("TLS SNI Name"))
-
-o = s:option(Flag, "no_check_certificate", translate("Disable Certificate Verification"))
-
-o = s:option(Value, "set_mark", translate("Packet Mark"))
-o.validate = helpers.validatePacketMark
-
-o = s:option(Flag, "use_proxy", translate("Use Proxy"))
-
-o = s:option(Value, "addition_arg", translate("Additional Server Arguments"))
+o = s:option(DummyValue, "name", translate("Name"))
+o = s:option(DummyValue, "ip", translate("Address or URL"))
+o = s:option(DummyValue, "type", translate("Protocol"))
+local protocols = {
+    udp = translate("UDP"), tcp = translate("TCP"),
+    tls = translate("DNS over TLS"), https = translate("DNS over HTTPS"),
+    quic = translate("DNS over QUIC"), h3 = translate("DNS over HTTP/3")
+}
+function o.cfgvalue(self, section)
+    local protocol = m.uci:get("smartdns", section, "type") or "udp"
+    return protocols[protocol] or protocol
+end
+o = s:option(DummyValue, "server_group", translate("Server Group"))
 
 s = m:section(TypedSection, "client-rule", translate("Client Rules"))
 s.anonymous = true

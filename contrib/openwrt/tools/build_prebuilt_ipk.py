@@ -49,7 +49,12 @@ default_prerm "$0" "$@"
 def copy_file(source: Path, root: Path, target: str, mode: int = 0o644) -> None:
     destination = root / target.lstrip("/")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
+    if source.suffix == ".htm":
+        # Lua LuCI's template parser leaves CR from CRLF inside generated Lua
+        # strings. Windows checkouts must not ship those line endings.
+        destination.write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
+    else:
+        shutil.copyfile(source, destination)
     os.chmod(destination, mode)
 
 

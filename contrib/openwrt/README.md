@@ -76,7 +76,20 @@ make package/luci-app-smartdns-rs-compat/compile V=s
 
 两种页面包二选一，不要同时安装。切换时先卸载现有 LuCI 页面包和对应翻译，再安装另一套页面包；保留 `smartdns-rs` 主包和 `/etc/config/smartdns`。现代 LuCI 运行 Lua 版前还需从固件的软件源安装 `luci-compat`。旧 Lua LuCI 已内置 CBI，不需要这个依赖，因此发布的通用 Lua 包不强制依赖现代固件专属的 `luci-lua-runtime`。
 
+在 Lua LuCI / QWRT 上安装时，需要下面两个包；只安装带 `compat` 的中文翻译包不会提供菜单和表单。若“服务”菜单没有 SmartDNS-rs，先用 `opkg list-installed | grep smartdns` 确认安装的是 `luci-app-smartdns-rs-compat`，而不是 JS 页面包 `luci-app-smartdns-rs`。
+
+```sh
+opkg install luci-app-smartdns-rs-compat_*.ipk luci-i18n-smartdns-rs-compat-zh-cn_*.ipk
+rm -f /tmp/luci-indexcache
+```
+
+安装后刷新 LuCI 页面。Windows 本地打包会将 `.htm` 模板转换为 LF 换行；CRLF 会导致部分 Lua LuCI 报 `unfinished string` 并返回 500。
+
+屏蔽文件与手写屏蔽列表生成独立的 `address /domain-set:.../#` 规则，同时拦截 A 和 AAAA。这样与 Passwall 分流列表重叠的域名也不会被其 `domain-rules ... -address -6` 覆盖放行。
+
 Lua 版支持同一套配置项、规则文件编辑、文件上传、日志读取/清空、配置校验与服务重启。上传时先填写“文件名”，选择对应目录的上传控件，再保存；规则文件选择使用路径输入框，可填写已上传文件的完整路径。日志页通过重新打开/刷新读取最新日志。Lua 表单的服务操作按钮针对当前已保存配置；修改 UCI 后先“保存并应用”，再执行校验或重启。
+
+上游 DNS 使用紧凑表格，每行显示启用、名称、地址、协议与服务器组。点击该行“编辑”进入单条上游设置，端口、TLS、代理、数据包标记等高级选项在编辑页中保留；“添加”也会进入新上游的编辑页。
 
 Lua 兼容只解决管理页面问题，不能据此保证二进制能运行在 LEDE 17.01 等旧系统上。legacy ipset 和 nftset 均需要对应内核能力；本次 QWRT 基准设备支持 ipset，但未启用 nftables 集合支持。
 
@@ -114,7 +127,11 @@ nslookup openwrt.org 127.0.0.1
 
 apk 固件使用对应的 `apk add --allow-untrusted` 安装命令。默认情况下最后一条查询经过 dnsmasq 转发到 `127.0.0.1#6053`。生成的有效配置在 `/var/etc/smartdns/smartdns.conf`，它不是 conffile，不应手工编辑。
 
-`check` 会重新生成配置并调用 `smartdns test`，失败时不会改动 dnsmasq。规则下载使用：
+`check` 会重新生成配置并调用 `smartdns test`，失败时不会改动 dnsmasq。
+
+配置重载会先校验新配置，通过后才交给 procd 更新进程；校验失败时保留正在运行的 DNS 和 dnsmasq 状态。进程切换仍需等待新实例启动，不能视为无中断热更新。
+
+规则下载使用：
 
 ```sh
 /etc/init.d/smartdns updatefiles
@@ -130,9 +147,11 @@ apk 固件使用对应的 `apk add --allow-untrusted` 安装命令。默认情�
 
 ```sh
 python3 contrib/openwrt/tests/check_contract.py
+python3 contrib/openwrt/tests/test_luci_packaging.py
 lua5.1 contrib/openwrt/tests/luci_compat.lua
 sh contrib/openwrt/tests/generate_config.sh
 sh contrib/openwrt/tests/dnsmasq_state.sh
+sh contrib/openwrt/tests/reload_service.sh
 shellcheck -s sh contrib/openwrt/smartdns-rs/files/etc/init.d/smartdns \
   contrib/openwrt/smartdns-rs/files/etc/uci-defaults/90-smartdns-rs \
   contrib/openwrt/luci-app-smartdns-rs/root/usr/libexec/smartdns-rs-call \

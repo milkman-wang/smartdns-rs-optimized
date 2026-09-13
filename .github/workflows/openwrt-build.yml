@@ -55,10 +55,12 @@ jobs:
       - name: Check interface contract
         run: |
           python3 contrib/openwrt/tests/check_contract.py
+          python3 contrib/openwrt/tests/test_luci_packaging.py
           python3 contrib/openwrt/tests/package_variants.py
           lua5.1 contrib/openwrt/tests/luci_compat.lua
           sh contrib/openwrt/tests/generate_config.sh
           sh contrib/openwrt/tests/dnsmasq_state.sh
+          sh contrib/openwrt/tests/reload_service.sh
 
       - name: Check shell
         run: |
@@ -68,7 +70,8 @@ jobs:
             contrib/openwrt/luci-app-smartdns-rs/root/usr/libexec/smartdns-rs-call \
             contrib/openwrt/luci-app-smartdns-rs-compat/root/etc/uci-defaults/90-luci-smartdns-rs-compat \
             contrib/openwrt/tests/generate_config.sh \
-            contrib/openwrt/tests/dnsmasq_state.sh
+            contrib/openwrt/tests/dnsmasq_state.sh \
+            contrib/openwrt/tests/reload_service.sh
 
       - name: Check LuCI JavaScript and translations
         run: |

@@ -292,7 +292,7 @@ def check_luci_validation() -> None:
 def check_luci_compat() -> None:
     compat = OPENWRT / "luci-app-smartdns-rs-compat"
     lua_root = compat / "root/usr/lib/lua/luci"
-    lua = load(lua_root / "model/cbi/smartdns/smartdns.lua")
+    lua = "\n".join(load(path) for path in (lua_root / "model/cbi/smartdns").glob("*.lua"))
     # Include the names from the fixed JS tables, as well as literal options.
     js = load(LUCI)
     options = set(re.findall(

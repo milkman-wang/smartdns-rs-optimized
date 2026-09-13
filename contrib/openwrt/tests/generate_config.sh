@@ -76,6 +76,7 @@ mock_value()
 		domain0.dualstack_ip_selection) echo no ;;
 		domain0.force_aaaa_soa) echo 1 ;;
 		domain0.nftset_name) echo '#4:inet#fw-4#smartdns-v4' ;;
+		domain0.block_domain_set_file) echo "$TEST_ROOT/domain.list" ;;
 		list0.enabled) echo 1 ;;
 		list0.domain_list_file) echo "$TEST_ROOT/domain.list" ;;
 		list0.server_group) echo overseas ;;
@@ -202,6 +203,9 @@ assert_line 'server-https https://dns.example/dns-query -tls-host-verify dns.exa
 assert_line 'client-rules 192.168.1.0/24'
 assert_line 'domain-rules /./ -dualstack-ip-selection no -address #6 -nftset #4:inet#fw-4#smartdns-v4'
 assert_line 'domain-rules /domain-set:forwarding-list/ -nameserver domestic-v4 -dualstack-ip-selection no -address #6 -nftset #4:inet#fw-4#smartdns-v4'
+assert_line "domain-set -name block-upload -file $TEST_ROOT/domain.list"
+assert_line 'address /domain-set:block-upload/#'
+assert_line 'address /domain-set:block-list/#'
 assert_line "domain-set -name domain-list0 -file $TEST_ROOT/domain.list"
 assert_line 'domain-rules /domain-set:domain-list0/ -nameserver overseas -address #6 -no-cache'
 assert_line 'blacklist-ip 203.0.113.0/24'

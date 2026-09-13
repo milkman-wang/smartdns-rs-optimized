@@ -75,7 +75,7 @@ function methods:depends() end
 function methods:value() end
 function methods:chain() end
 function methods:cbid(section) return "cbid.smartdns." .. section .. "." .. self.name end
-for _, kind in ipairs({"TypedSection", "SimpleSection", "Flag", "Value", "ListValue",
+for _, kind in ipairs({"TypedSection", "NamedSection", "SimpleSection", "Flag", "Value", "DummyValue", "ListValue",
 	"DynamicList", "FileUpload", "TextValue", "Button"}) do _G[kind] = kind end
 function Map(name, title)
 	local map = object("Map", name, title)
@@ -96,7 +96,17 @@ assert(option("smartdns", "port").default == "6053")
 assert(option("smartdns", "enabled").default == "0")
 assert(option("smartdns", "speed_check_mode").default == "ping,tcp:80,tcp:443")
 assert(option("smartdns", "response_mode").default == "first-ping")
-assert(option("server", "set_mark").validate == helpers.validatePacketMark)
+local upstream = option("server", "enabled").map
+local server_table
+for _, section in ipairs(upstream.sections) do
+	if section.name == "server" then server_table = section end
+end
+assert(server_table.template == "cbi/tblsection")
+local columns = 0
+for _ in pairs(server_table.options) do columns = columns + 1 end
+assert(columns == 5, "Upstream list must contain summary columns only")
+assert(option("server", "ip").kind == DummyValue)
+assert(server_table.options.set_mark == nil, "Advanced settings belong on the edit page")
 assert(option("download-file", "name").validate == helpers.validateDownloadName)
 local editor = option("smartdns", "custom_conf")
 editor:write("cfg01", "cache-size 8192\r\n")
@@ -126,4 +136,37 @@ assert(commands[#commands] == "/usr/libexec/smartdns-rs-call tail 2>&1")
 log.sections[1].options._clear:write()
 assert(commands[#commands] == "/usr/libexec/smartdns-rs-call clear_log 2>&1")
 assert(loadfile(root .. "controller/smartdns.lua"))
+
+-- The row editor must load exactly one upstream and retain all advanced fields.
+local redirected
+local dispatcher = {build_url = function(...) return "/" .. table.concat({...}, "/") end}
+local http = {redirect = function(url) redirected = url end}
+package.preload["luci.dispatcher"] = function() return dispatcher end
+package.preload["luci.http"] = function() return http end
+luci = {dispatcher = dispatcher, http = http}
+assert(server_table:extedit("cfg01") == "/admin/services/smartdns/server/cfg01")
+TypedSection = {create = function() return "cfgnew" end}
+assert(server_table:create() == "cfgnew")
+assert(redirected == "/admin/services/smartdns/server/cfgnew")
+local make_map = Map
+Map = function(...)
+	local map = make_map(...)
+	map.uci.get = function(self, config, id, key)
+		if id == "cfg01" then return "server" end
+		return "smartdns"
+	end
+	return map
+end
+arg = {"cfg01"}
+local detail = assert(loadfile(root .. "model/cbi/smartdns/server.lua"))()
+assert(#detail.sections == 1 and detail.sections[1].name == "cfg01")
+assert(detail.sections[1].kind == NamedSection)
+assert(detail.sections[1].options.ip.rmempty == false)
+assert(detail.sections[1].options.set_mark.validate == helpers.validatePacketMark)
+assert(detail.sections[1].options.no_check_certificate.kind == Flag)
+assert(detail.sections[1].options.use_proxy.kind == Flag)
+assert(detail.sections[1].options.port.datatype == "port")
+arg = {"settings"}
+assert(assert(loadfile(root .. "model/cbi/smartdns/server.lua"))() == nil)
+assert(redirected == "/admin/services/smartdns")
 print("Lua 5.1 LuCI models, validation, file handlers and actions: OK")

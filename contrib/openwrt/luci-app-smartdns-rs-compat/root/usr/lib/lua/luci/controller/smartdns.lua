@@ -8,6 +8,7 @@ function index()
 	page.dependent = true
 	page.acl_depends = {"luci-app-smartdns-rs"}
 	entry({"admin", "services", "smartdns", "log"}, cbi("smartdns/log")).leaf = true
+	entry({"admin", "services", "smartdns", "server"}, cbi("smartdns/server")).leaf = true
 	entry({"admin", "services", "smartdns", "status"}, call("status")).leaf = true
 end
 
