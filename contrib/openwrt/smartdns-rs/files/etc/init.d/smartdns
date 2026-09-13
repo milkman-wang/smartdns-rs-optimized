@@ -874,6 +874,8 @@ reload_service()
 	# rc.common's start wrapper closes the procd service even on validation error,
 	# so validate before opening an update, then let procd replace the instance.
 	prepare_service_config || return 1
+	# initscript is set by /etc/rc.common before it sources this file.
+	# shellcheck disable=SC2154
 	procd_open_service "$NAME" "$initscript"
 	start_prepared_service || return 1
 	procd_close_service
