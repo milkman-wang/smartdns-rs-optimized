@@ -1718,3 +1718,9 @@ msgstr "缓存大小必须为 -1、0 或正整数。"
 
 msgid "Supported modes are ping, tcp:PORT, tcp-syn:PORT, http[:PORT], https[:PORT], and none."
 msgstr "支持 ping、tcp:端口、tcp-syn:端口、http[:端口]、https[:端口] 和 none。"
+
+msgid "Configuration validation failed. Please check the system log."
+msgstr "配置校验失败，请检查系统日志。"
+
+msgid "Configuration changes applied."
+msgstr "配置更改已应用。"

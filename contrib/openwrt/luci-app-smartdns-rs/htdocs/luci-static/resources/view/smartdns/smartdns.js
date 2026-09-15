@@ -119,6 +119,9 @@ function textFileOption(section, tab, name, title, description, path, rows) {
 		: section.option(form.TextValue, name, title, description);
 	o.rows = rows || 12;
 	o.monospace = true;
+	// Soft wrapping keeps long rules selectable without horizontal dragging.
+	// It does not insert line breaks into the saved configuration.
+	o.wrap = true;
 	o.cfgvalue = function() {
 		return L.resolveDefault(fs.trimmed(path), '');
 	};
@@ -126,10 +129,35 @@ function textFileOption(section, tab, name, title, description, path, rows) {
 		value = (value || '').trim().replace(/\r\n/g, '\n');
 		return fs.write(path, value ? value + '\n' : '');
 	};
+	o.remove = function(sectionId) {
+		return this.write(sectionId, '');
+	};
 	return o;
 }
 
 return view.extend({
+	handleSaveApply: function(ev, mode) {
+		return this.handleSave(ev).then(function() {
+			return uci.changes();
+		}).then(function(changes) {
+			// UCI changes trigger the service reload through procd. File-only
+			// edits need an explicit reload, including Save followed by Apply.
+			if (changes.smartdns && changes.smartdns.length)
+				return ui.changes.apply(mode == '0');
+
+			return fs.exec('/etc/init.d/smartdns', [ 'reload' ]).then(function(result) {
+				if (result.code !== 0)
+					throw new Error(result.stderr || result.stdout || _('Configuration validation failed. Please check the system log.'));
+				if (Object.keys(changes).length)
+					return ui.changes.apply(mode == '0');
+				ui.addNotification(null, E('p', {}, [ _('Configuration changes applied.') ]), 'info');
+			});
+		}).catch(function(err) {
+			ui.addNotification(null, E('p', {}, [ err.message ]), 'error');
+			throw err;
+		});
+	},
+
 	load: function() {
 		return Promise.all([
 			uci.load('smartdns'),

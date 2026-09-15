@@ -18,7 +18,15 @@ stop() { echo "reload must not stop the working DNS instance" >&2; exit 1; }
 start() { echo "reload must not validate again through rc.common start" >&2; exit 1; }
 procd_open_service() { record open; }
 procd_open_instance() { record instance; }
-procd_set_param() { :; }
+procd_set_param() {
+	if [ "$1" = file ]; then
+		shift
+		[ "$*" = "$RUNTIME_CONF $CUSTOM_CONF $ADDRESS_CONF $BLACKLIST_CONF $FORWARDING_LIST $BLOCK_LIST" ] || {
+			echo "reload does not watch all editable rule files" >&2
+			exit 1
+		}
+	fi
+}
 procd_close_instance() { record ready; }
 procd_close_service() { record update; }
 

@@ -842,7 +842,10 @@ start_prepared_service()
 	procd_open_instance smartdns
 	procd_set_param command "$PROG" run -d "$CONF_DIR" -c "$RUNTIME_CONF"
 	procd_set_param respawn 3600 5 5
-	procd_set_param file "$RUNTIME_CONF"
+	# These editors write files directly, leaving the generated include paths
+	# unchanged. Track their contents so a file-only reload replaces the process.
+	procd_set_param file "$RUNTIME_CONF" "$CUSTOM_CONF" "$ADDRESS_CONF" \
+		"$BLACKLIST_CONF" "$FORWARDING_LIST" "$BLOCK_LIST"
 	procd_set_param limits nofile="65535 65535"
 	[ "$COREDUMP" = "1" ] && procd_append_param limits core="unlimited"
 	procd_set_param stdout 1

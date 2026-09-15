@@ -76,6 +76,7 @@ jobs:
       - name: Check LuCI JavaScript and translations
         run: |
           node --check contrib/openwrt/luci-app-smartdns-rs/htdocs/luci-static/resources/view/smartdns/smartdns.js
+          node contrib/openwrt/tests/luci_file_apply.js
           node --check contrib/openwrt/luci-app-smartdns-rs/htdocs/luci-static/resources/view/smartdns/log.js
           msgfmt --check --output-file=/dev/null contrib/openwrt/luci-app-smartdns-rs/po/zh_Hans/smartdns-rs.po
           msgfmt --check --output-file=/dev/null contrib/openwrt/luci-app-smartdns-rs-compat/po/zh_Hans/smartdns.po
