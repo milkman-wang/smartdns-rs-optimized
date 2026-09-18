@@ -689,10 +689,7 @@ pub struct RuntimeConfigBuilder {
 impl RuntimeConfigBuilder {
     pub fn build(mut self) -> anyhow::Result<RuntimeConfig> {
         if let Some(conf_file) = self.conf_file.clone() {
-            let loaded = self.loaded_files.contains(&conf_file);
-            if !loaded {
-                self.load_file(&conf_file)?;
-            }
+            self.load_file(&conf_file)?;
         }
 
         let conf_file = self.conf_file;
@@ -951,21 +948,67 @@ impl RuntimeConfigBuilder {
         let path = self.resolve_filepath(path);
 
         if path.exists() {
+            let path = path.canonicalize()?;
+            if self.loaded_files.contains(&path) {
+                return Ok(());
+            }
             debug!("loading extra configuration from {:?}", path);
 
             let file = File::open(&path)?;
             let reader = BufReader::new(file);
 
-            if self.conf_file.is_none() {
-                self.conf_file = Some(path.clone());
+            // A glob can include its parent configuration or overlap another
+            // include. Register the concrete file before following its includes.
+            self.loaded_files.insert(path.clone());
+            if let Some(dir) = path.parent() {
+                self.dirs.insert(dir.to_path_buf());
             }
+            let previous_conf_file = self.conf_file.replace(path);
             for line in reader.lines().map_while(Result::ok) {
                 self.config(line.as_str());
+            }
+            if let Some(previous) = previous_conf_file {
+                self.conf_file = Some(previous);
             }
         } else {
             warn!("configuration file {:?} does not exist", path);
         }
 
+        Ok(())
+    }
+
+    fn load_include(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        if !path.to_string_lossy().contains(['*', '?', '['])
+            || self.resolve_filepath(&path).is_file()
+        {
+            return self.load_file(path);
+        }
+
+        // Relative patterns belong to the file containing the conf-file line,
+        // not to the daemon's working directory.
+        let pattern = if path.is_absolute() {
+            path
+        } else if let Some(dir) = self.conf_file.as_ref().and_then(|file| file.parent()) {
+            dir.join(path)
+        } else {
+            path
+        };
+        let options = glob::MatchOptions {
+            require_literal_leading_dot: true,
+            ..glob::MatchOptions::new()
+        };
+        let mut matched = false;
+        // glob yields paths in alphabetical order, keeping rule overrides stable.
+        for entry in glob::glob_with(&pattern.to_string_lossy(), options)? {
+            let path = entry?;
+            if path.is_file() {
+                matched = true;
+                self.load_file(path)?;
+            }
+        }
+        if !matched {
+            warn!("configuration file pattern {:?} matched no files", pattern);
+        }
         Ok(())
     }
 
@@ -1078,14 +1121,7 @@ impl RuntimeConfigBuilder {
                 CaFile(v) => self.ca_file = Some(v),
                 CaPath(v) => self.ca_path = Some(v),
                 ConfFile(v) => {
-                    if !self.loaded_files.contains(&v) {
-                        self.load_file(v.clone()).expect("load_file failed");
-                        if let Some(dir) = v.parent() {
-                            self.dirs.insert(dir.to_path_buf());
-                        }
-
-                        self.loaded_files.insert(v);
-                    }
+                    self.load_include(v).expect("load conf-file failed");
                 }
                 DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(v),
                 ResolvFile(v) => self.resolv_file = Some(v),
@@ -2063,5 +2099,153 @@ mod tests {
 
         assert_eq!(cfg.client_rules().len(), 1);
         assert_eq!(cfg.client_rules()[0].group, "office");
+    }
+
+    struct IncludeTestDir(PathBuf);
+
+    impl IncludeTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "smartdns-includes-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for IncludeTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_conf_file_glob_loads_passwall_routing() {
+        let dir = IncludeTestDir::new();
+        dir.write("gfwlist", "google.com\nyoutube.com\n");
+        dir.write(
+            "passwall-ignore.CONF",
+            "nameserver /www.jd.com/unexpected\n",
+        );
+        dir.write(
+            "passwall.conf",
+            "domain-set -name passwall-gfwlist -file gfwlist\n\
+             domain-rules /./ -nameserver China\n\
+             domain-rules /domain-set:passwall-gfwlist/ -nameserver passwall_proxy\n",
+        );
+        let main = dir.write(
+            "main.conf",
+            &format!("conf-file \"{}\"\n", dir.0.join("passwall*.conf").display()),
+        );
+        let cfg = RuntimeConfig::builder()
+            .with_conf_file(main)
+            .build()
+            .unwrap();
+
+        for (domain, expected) in [
+            ("www.google.com", "passwall_proxy"),
+            ("www.youtube.com", "passwall_proxy"),
+            ("www.jd.com", "China"),
+        ] {
+            let rule = cfg
+                .find_domain_rule(&domain.parse().unwrap(), DEFAULT_GROUP)
+                .unwrap();
+            assert_eq!(rule.nameserver.as_deref(), Some(expected), "{domain}");
+        }
+    }
+
+    #[test]
+    fn test_conf_file_glob_resolves_nested_relative_paths_in_order() {
+        let dir = IncludeTestDir::new();
+        let main = dir.write("main.conf", "conf-file rules/entry.conf\n");
+        dir.write("rules/entry.conf", "conf-file parts/*.conf\n");
+        // Create in reverse order so directory enumeration cannot decide precedence.
+        dir.write("rules/parts/20-last.conf", "rr-ttl-min 20\n");
+        dir.write("rules/parts/10-first.conf", "rr-ttl-min 10\n");
+        let cfg = RuntimeConfig::builder()
+            .with_conf_file(main.clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.rr_ttl_min(), Some(20));
+        assert_eq!(cfg.conf_file.as_ref(), Some(&main));
+    }
+
+    #[test]
+    fn test_conf_file_glob_loads_overlapping_and_self_includes_once() {
+        let dir = IncludeTestDir::new();
+        let main = dir.write(
+            "main.conf",
+            "conf-file *.conf\n\
+             conf-file passwall-a.conf\n\
+             conf-file ./passwall-?.conf\n\
+             conf-file passwall-[ab].conf\n",
+        );
+        dir.write("passwall-b.conf", "nameserver /b.example/remote\n");
+        dir.write("passwall-a.conf", "nameserver /a.example/remote\n");
+        dir.write(".hidden.conf", "nameserver /hidden.example/remote\n");
+        let cfg = RuntimeConfig::builder()
+            .with_conf_file(main)
+            .build()
+            .unwrap();
+        let rules = &cfg.rule_group(DEFAULT_GROUP).forward_rules;
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].domain, Domain::Name("a.example".parse().unwrap()));
+        assert_eq!(rules[1].domain, Domain::Name("b.example".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_conf_file_glob_reloads_new_files_and_skips_directories() {
+        let dir = IncludeTestDir::new();
+        let main = dir.write("main.conf", "conf-file passwall*.conf\n");
+        std::fs::create_dir(dir.0.join("passwall-directory.conf")).unwrap();
+        let cfg = RuntimeConfig::builder()
+            .with_conf_file(main)
+            .build()
+            .unwrap();
+        assert!(cfg.rule_group(DEFAULT_GROUP).forward_rules.is_empty());
+
+        dir.write("passwall.conf", "nameserver /google.com/passwall_proxy\n");
+        let reloaded = cfg.reload_new().unwrap();
+        let rules = &reloaded.rule_group(DEFAULT_GROUP).forward_rules;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].nameserver, "passwall_proxy");
+        assert_eq!(rules[0].domain, Domain::Name("google.com".parse().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_conf_file_glob_loads_passwall_symlink_once() {
+        let dir = IncludeTestDir::new();
+        let target = dir.write(
+            "acl/default/smartdns.conf",
+            "nameserver /google.com/passwall_proxy\n",
+        );
+        std::os::unix::fs::symlink(&target, dir.0.join("passwall.conf")).unwrap();
+        let main = dir.write(
+            "main.conf",
+            "conf-file passwall*.conf\nconf-file acl/default/smartdns.conf\n",
+        );
+        let cfg = RuntimeConfig::builder()
+            .with_conf_file(main)
+            .build()
+            .unwrap();
+        let rules = &cfg.rule_group(DEFAULT_GROUP).forward_rules;
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].nameserver, "passwall_proxy");
     }
 }
