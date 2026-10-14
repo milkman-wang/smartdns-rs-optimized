@@ -29,9 +29,10 @@ CUSTOM_CONF=$CONF_DIR/custom.conf
 FORWARDING_LIST=$CONF_DIR/domain-forwarding.list
 BLOCK_LIST=$CONF_DIR/domain-block.list
 
-EXTRA_COMMANDS="updatefiles check"
+EXTRA_COMMANDS="updatefiles check flushcache"
 EXTRA_HELP="        updatefiles      Download configured rule files
-        check            Generate and validate the effective configuration"
+        check            Generate and validate the effective configuration
+        flushcache       Empty the DNS cache without restarting"
 
 SERVICE_ENABLED=0
 SERVICE_PORT=6053
@@ -992,4 +993,18 @@ check()
 	status=$?
 	[ "$status" -eq 0 ] && rm -f "$RUNTIME_TMP"
 	return "$status"
+}
+
+flushcache()
+{
+	# SmartDNS-rs empties its cache, including the saved copy, on SIGUSR1.
+	if ! procd_send_signal "$NAME" smartdns USR1 2>/dev/null; then
+		echo "SmartDNS-rs is not running."
+		return 1
+	fi
+	# A forwarding dnsmasq answers from its own cache; SIGHUP clears it.
+	if [ "$(uci -q get smartdns.@smartdns[0].dnsmasq_managed)" = "forward" ]; then
+		procd_send_signal dnsmasq '*' HUP 2>/dev/null || true
+	fi
+	return 0
 }

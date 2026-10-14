@@ -168,6 +168,18 @@ end
 package.loaded["luci.http"] = nil
 call_status = 0
 
+local flush = option("smartdns", "_flush_cache")
+assert(flush.tab == "advanced")
+command_output = ""
+flush:write()
+assert(commands[#commands] == "/etc/init.d/smartdns flushcache 2>&1")
+assert(model.message == "DNS cache cleared.")
+command_output = "SmartDNS-rs is not running.\n"
+flush:write()
+assert(model.message == "SmartDNS-rs is not running.\n")
+model.message = nil
+command_output = "command output"
+
 local upload = option("smartdns", "upload_list_file")
 for _, name in ipairs({"upload_conf_file", "upload_list_file", "upload_other_file"}) do
 	local picker = option("smartdns", name)

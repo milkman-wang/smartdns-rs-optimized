@@ -1734,5 +1734,17 @@ msgstr "通知"
 msgid "Other"
 msgstr "其他"
 
+msgid "Clear DNS Cache"
+msgstr "清空 DNS 缓存"
+
+msgid "Empty the cache now, including the saved copy, so the next queries are resolved again. Devices keep their own cached answers until those expire."
+msgstr "立即清空缓存（包括已保存的副本），之后的查询会重新解析。各设备自己缓存的结果要等到过期。"
+
+msgid "Clear"
+msgstr "清空"
+
+msgid "DNS cache cleared."
+msgstr "DNS 缓存已清空。"
+
 msgid "Configuration changes applied."
 msgstr "配置更改已应用。"

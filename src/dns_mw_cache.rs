@@ -564,9 +564,18 @@ impl DnsCache {
     }
 
     pub fn clear(&self) {
+        self.flush(None);
+    }
+
+    /// Drops every entry. With `persisted`, the saved copy is emptied too, so
+    /// a restart does not bring old answers back.
+    pub fn flush(&self, persisted: Option<&Path>) {
         let mut cache = self.cache.lock().unwrap();
         cache.clear();
         self.memory_usage.store(0, Ordering::Relaxed);
+        if let Some(path) = persisted {
+            cache.persist(path);
+        }
     }
 
     pub fn cached_records(&self) -> Vec<CachedQueryRecord> {
@@ -2150,6 +2159,29 @@ mod tests {
         .await
         .expect("the check must replace the entry");
         assert!(remaining_lifetime(&cache, &query) <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_flush_empties_the_cache_and_its_saved_copy() {
+        let path =
+            std::env::temp_dir().join(format!("smartdns-flush-test-{}.cache", std::process::id()));
+        let cache = DnsCache::new(10, true, 0, 5);
+        let query = Query::query("flush.example.".parse().unwrap(), RecordType::A);
+        cache.insert_response(
+            ip_response(&query, &["192.0.2.1"]),
+            Instant::now(),
+            30,
+            "default",
+        );
+        cache.cache.lock().unwrap().persist(&path);
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+
+        cache.flush(Some(&path));
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.memory_bytes(), 0);
+        let saved = std::fs::metadata(&path).unwrap().len();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(saved, 0, "a restart must not load the old answers");
     }
 
     #[test]

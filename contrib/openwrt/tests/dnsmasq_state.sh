@@ -114,3 +114,29 @@ assert_value 'dhcp.@dnsmasq[0].domainneeded' '1'
 assert_value 'smartdns.@smartdns[0].dnsmasq_managed' ''
 
 echo "OpenWrt dnsmasq state round-trip test: OK"
+
+signals=""
+signal_status=0
+procd_send_signal()
+{
+	signals="${signals}${signals:+ }$1/$2/$3"
+	return "$signal_status"
+}
+
+apply_dnsmasq_forward 6053
+flushcache
+[ "$signals" = "smartdns/smartdns/USR1 dnsmasq/*/HUP" ]
+
+signals=""
+restore_dnsmasq
+flushcache
+[ "$signals" = "smartdns/smartdns/USR1" ]
+
+signal_status=252
+if output="$(flushcache)"; then
+	echo "flushcache succeeded without a running service" >&2
+	exit 1
+fi
+[ "$output" = "SmartDNS-rs is not running." ]
+
+echo "OpenWrt cache flush signals SmartDNS-rs and a forwarding dnsmasq: OK"

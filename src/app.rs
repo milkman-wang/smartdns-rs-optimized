@@ -51,6 +51,16 @@ impl App {
         self.cache.read().await.clone()
     }
 
+    /// Drops every cached answer, and the saved copy when the cache persists,
+    /// so a restart does not bring old answers back.
+    pub async fn flush_cache(&self) {
+        if let Some(cache) = self.cache().await {
+            let cfg = self.cfg().await;
+            cache.flush(cfg.cache_persist().then(|| cfg.cache_file()).as_deref());
+        }
+        log::info!("flushed cache");
+    }
+
     pub fn dns_handle(&self) -> DnsHandle {
         self.dns_handle.clone()
     }
@@ -327,6 +337,9 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
         .block_on(app.init())
         .expect("failed to initialize SmartDNS");
 
+    #[cfg(unix)]
+    runtime.spawn(flush_cache_on_sigusr1(app.clone()));
+
     let shutdown_timeout = Duration::from_secs(5);
 
     runtime.block_on(async move {
@@ -351,6 +364,21 @@ pub fn serve(cfg: Arc<RuntimeConfig>) {
 
     runtime.shutdown_timeout(shutdown_timeout);
     crate::plugins::shutdown();
+}
+
+/// `SIGUSR1` empties the cache; the OpenWrt service's `flushcache` sends it.
+#[cfg(unix)]
+async fn flush_cache_on_sigusr1(app: App) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    match signal(SignalKind::user_defined1()) {
+        Ok(mut flush) => {
+            while flush.recv().await.is_some() {
+                app.flush_cache().await;
+            }
+        }
+        Err(err) => log::warn!("cannot listen for SIGUSR1 to flush the cache: {err}"),
+    }
 }
 
 struct AppGuard;

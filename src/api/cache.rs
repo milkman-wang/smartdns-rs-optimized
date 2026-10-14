@@ -6,7 +6,7 @@ use super::openapi::{
     routes,
 };
 use super::{ServeState, StatefulRouter};
-use crate::{api::DataListPayload, config::CacheConfig, dns_mw_cache::CachedQueryRecord, log};
+use crate::{api::DataListPayload, config::CacheConfig, dns_mw_cache::CachedQueryRecord};
 use axum::{Json, extract::State, http::StatusCode};
 
 pub fn routes() -> StatefulRouter {
@@ -29,10 +29,7 @@ async fn caches(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<Ca
 
 #[post("/caches/flush", tag = "Caches", operation_id = "flush_caches")]
 async fn flush(State(state): State<Arc<ServeState>>) -> StatusCode {
-    if let Some(c) = state.app.cache().await {
-        c.clear();
-    }
-    log::info!("flushed cache");
+    state.app.flush_cache().await;
     StatusCode::NO_CONTENT
 }
 

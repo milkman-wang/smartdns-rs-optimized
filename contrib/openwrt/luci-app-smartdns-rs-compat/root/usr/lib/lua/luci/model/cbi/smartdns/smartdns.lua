@@ -156,6 +156,14 @@ o.placeholder = "/etc/smartdns/smartdns.cache"
 o:depends("cache_persist", "1")
 o.validate = helpers.validateCacheFile
 
+o = s:taboption("advanced", Button, "_flush_cache", translate("Clear DNS Cache"), translate("Empty the cache now, including the saved copy, so the next queries are resolved again. Devices keep their own cached answers until those expire."))
+o.inputtitle = translate("Clear")
+o.inputstyle = "reset"
+function o.write()
+	local output = sys.exec("/etc/init.d/smartdns flushcache 2>&1")
+	m.message = output ~= "" and output or translate("DNS cache cleared.")
+end
+
 o = s:taboption("advanced", Value, "num_workers", translate("Worker Threads"))
 o.datatype = "range(1,128)"
 o.placeholder = "2"

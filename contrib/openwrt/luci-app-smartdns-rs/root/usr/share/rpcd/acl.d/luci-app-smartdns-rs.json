@@ -19,6 +19,7 @@
 				"/etc/init.d/smartdns reload": [ "exec" ],
 				"/etc/init.d/smartdns updatefiles": [ "exec" ],
 				"/etc/init.d/smartdns check": [ "exec" ],
+				"/etc/init.d/smartdns flushcache": [ "exec" ],
 				"/usr/libexec/smartdns-rs-call clear_log": [ "exec" ]
 			},
 			"uci": [ "smartdns" ]

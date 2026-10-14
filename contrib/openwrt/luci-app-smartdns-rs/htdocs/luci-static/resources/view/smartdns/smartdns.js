@@ -374,6 +374,20 @@ return view.extend({
 		o.validate = validateCacheFile;
 		o.depends('cache_persist', '1');
 
+		o = s.taboption('advanced', form.Button, '_flush_cache', _('Clear DNS Cache'),
+			_('Empty the cache now, including the saved copy, so the next queries are resolved again. Devices keep their own cached answers until those expire.'));
+		o.inputtitle = _('Clear');
+		o.inputstyle = 'reset';
+		o.onclick = function() {
+			return fs.exec('/etc/init.d/smartdns', [ 'flushcache' ]).then(function(res) {
+				if (res.code !== 0)
+					throw new Error(res.stderr || res.stdout || _('Clearing the DNS cache failed; see the system log.'));
+				ui.addNotification(null, E('p', {}, [ _('DNS cache cleared.') ]));
+			}).catch(function(err) {
+				ui.addNotification(null, E('p', {}, [ err.message ]), 'error');
+			});
+		};
+
 		o = s.taboption('advanced', form.Flag, 'resolve_local_hostnames', _('Resolve Local Hostnames'));
 		o.default = o.enabled;
 		o.rmempty = false;
