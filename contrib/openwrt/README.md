@@ -80,7 +80,8 @@ make package/luci-app-smartdns-rs-compat/compile V=s
 在 Lua LuCI / QWRT 上只需安装 compat 主包，现有简体中文翻译已合并其中。内置翻译使用独立文件名，与旧语言包无文件冲突；旧包可保留或卸载。若“服务”菜单没有 SmartDNS-rs，先用 `opkg list-installed | grep smartdns` 确认安装的是 `luci-app-smartdns-rs-compat`，而不是 JS 页面包 `luci-app-smartdns-rs`。
 
 ```sh
-opkg install luci-app-smartdns-rs-compat_*.ipk
+opkg install luci-app-smartdns-rs-compat-*-openwrt-24.10.ipk
+# apk 固件：apk add --allow-untrusted luci-app-smartdns-rs-compat-*-openwrt-25.12.apk
 rm -f /tmp/luci-indexcache
 ```
 
@@ -117,9 +118,10 @@ python contrib/openwrt/tools/build_prebuilt_ipk.py
 ## 安装与首次验证
 
 ```sh
-opkg install smartdns-rs_*.ipk luci-app-smartdns-rs_*.ipk \
-  luci-i18n-smartdns-rs-zh-cn_*.ipk
-/etc/init.d/rpcd restart
+opkg update && opkg install luci-compat
+opkg install smartdns-rs-*-openwrt-24.10-aarch64_cortex-a53.ipk \
+  luci-app-smartdns-rs-compat-*-openwrt-24.10.ipk
+rm -f /tmp/luci-indexcache
 uci set smartdns.@smartdns[0].enabled='1'
 uci commit smartdns
 /etc/init.d/smartdns restart
@@ -128,7 +130,7 @@ logread -e smartdns-rs
 nslookup openwrt.org 127.0.0.1
 ```
 
-apk 固件使用对应的 `apk add --allow-untrusted` 安装命令。默认情况下最后一条查询经过 dnsmasq 转发到 `127.0.0.1#6053`。生成的有效配置在 `/var/etc/smartdns/smartdns.conf`，它不是 conffile，不应手工编辑。
+把架构换成固件的 `DISTRIB_ARCH`。OpenWrt 25.12 及 snapshot 使用 apk：`apk add luci-compat` 后，用 `apk add --allow-untrusted` 安装 `*-openwrt-25.12*.apk`。旧 Lua LuCI 固件不需要 `luci-compat`。默认情况下最后一条查询经过 dnsmasq 转发到 `127.0.0.1#6053`。生成的有效配置在 `/var/etc/smartdns/smartdns.conf`，它不是 conffile，不应手工编辑。
 
 `check` 会重新生成配置并调用 `smartdns test`，失败时不会改动 dnsmasq。
 
@@ -172,7 +174,7 @@ Fork 的 `Sync upstream` 工作流每天检查一次 `mokeyish/smartdns-rs` 的 
 1. 用普通 Git merge 合并上游，遇到冲突立即失败，不强行覆盖 OpenWrt 适配；
 2. 先推送合并后的 Fork 提交，再将 OpenWrt Makefile 固定到这份合并源码及其归档校验值，保留本 fork 的功能；同步更新两套 LuCI 版本；
 3. 推送 Fork 的 `main` 并分别调度无界面版和 WebUI 版的九架构 APK/IPK 构建；
-4. 仅在契约测试、九个 snapshot APK 架构和九个 OpenWrt 24.10.7 IPK 架构全部成功后创建 GitHub Release，同时生成 `SHA256SUMS`。Release 只包含本项目的主包、JS LuCI 与其简体中文翻译、内置中文的 Lua compat 包，不包含 SDK 下载的依赖包；APK 主包文件名会附加 OpenWrt 架构，避免不同架构相互覆盖。发布文件名中的 `~` 会规范为 `.`，与 GitHub 实际保存的附件名及校验清单保持一致。
+4. 仅在契约测试、九个 snapshot APK 架构和九个 OpenWrt 24.10.7 IPK 架构全部成功后创建 GitHub Release，同时生成 `SHA256SUMS`。Release 只包含本项目的主包和内置中文的 Lua compat 页面包，不包含 SDK 下载的依赖包；JS 页面包照常构建和测试，但只以源码提供。文件名统一为 `包名-版本-openwrt-<24.10|25.12>[-架构].<ipk|apk>`，同一 OpenWrt 版本的包排在一起；`~` 会规范为 `.`，与 GitHub 实际保存的附件名及校验清单保持一致。
 
 Action 的运行编号会成为单调递增的 `PKG_RELEASE`，因此同一个 SmartDNS-rs 版本内的后续自动包也能被包管理器识别为升级。OpenWrt 25.12/snapshot 使用 APK；OpenWrt 24.10 以及仍使用 opkg 的兼容固件应安装 Release 中的 IPK。两个矩阵使用各自的官方 SDK 构建，包格式不能混装。
 

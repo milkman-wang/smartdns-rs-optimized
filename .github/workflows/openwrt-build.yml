@@ -272,39 +272,52 @@ jobs:
         run: |
           set -euo pipefail
           mkdir release
+          compat=luci-app-smartdns-rs-compat
           while IFS= read -r -d '' package; do
             name="$(basename "$package")"
-            safe_name="${name//\~/.}"
             artifact="${package#artifacts/}"
             artifact="${artifact%%/*}"
+            # The snapshot SDK builds the APK packages for OpenWrt 25.12 and
+            # newer; the 24.10.7 SDK builds the IPK packages.
             case "$artifact" in
-              openwrt-${VARIANT}-apk-*) arch="${artifact#"openwrt-${VARIANT}-apk-"}" ;;
-              openwrt-${VARIANT}-ipk-*) arch="${artifact#"openwrt-${VARIANT}-ipk-"}" ;;
+              openwrt-${VARIANT}-apk-*) arch="${artifact#"openwrt-${VARIANT}-apk-"}"; openwrt=25.12 ;;
+              openwrt-${VARIANT}-ipk-*) arch="${artifact#"openwrt-${VARIANT}-ipk-"}"; openwrt=24.10 ;;
               *) continue ;;
             esac
             arch="${arch%"-$GITHUB_SHA"}"
 
+            # Publish NAME-VERSION-openwrt-RELEASE[-ARCH].FORMAT, so each OpenWrt
+            # release's packages sort together. Only the Lua LuCI is published;
+            # the JavaScript one is built and tested but ships as source only.
             case "$name" in
               "${CORE_PACKAGE}"-[0-9]*.apk)
-                cp "$package" "release/${safe_name%.apk}-$arch.apk"
+                version="${name#"${CORE_PACKAGE}-"}"
+                target="${CORE_PACKAGE}-${version%.apk}-openwrt-${openwrt}-${arch}.apk"
                 ;;
               "${CORE_PACKAGE}"_*.ipk)
-                cp "$package" "release/$safe_name"
+                version="${name#"${CORE_PACKAGE}_"}"
+                target="${CORE_PACKAGE}-${version%%_*}-openwrt-${openwrt}-${arch}.ipk"
                 ;;
-              luci-app-smartdns-rs-compat_*.ipk|luci-app-smartdns-rs-*.apk|luci-i18n-smartdns-rs-zh-cn-*.apk|luci-app-smartdns-rs_*.ipk|luci-i18n-smartdns-rs-zh-cn_*.ipk)
-                test -e "release/$safe_name" || cp "$package" "release/$safe_name"
+              "${compat}"-[0-9]*.apk)
+                version="${name#"${compat}-"}"
+                target="${compat}-${version%.apk}-openwrt-${openwrt}.apk"
                 ;;
+              "${compat}"_*.ipk)
+                version="${name#"${compat}_"}"
+                target="${compat}-${version%%_*}-openwrt-${openwrt}.ipk"
+                ;;
+              *) continue ;;
             esac
+            target="${target//\~/.}"
+            # LuCI packages are the same for every architecture; keep one copy.
+            test -e "release/$target" || cp "$package" "release/$target"
           done < <(find artifacts -type f -path '*/bin/packages/*/action/*' \( -name '*.ipk' -o -name '*.apk' \) -print0)
 
-          test "$(find release -maxdepth 1 -type f -name "${CORE_PACKAGE}-[0-9]*.apk" | wc -l)" -eq 9
-          test "$(find release -maxdepth 1 -type f -name "${CORE_PACKAGE}_*.ipk" | wc -l)" -eq 9
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs-*.apk' | wc -l)" -eq 2
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs_*.ipk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-i18n-smartdns-rs-zh-cn-*.apk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-i18n-smartdns-rs-zh-cn_*.ipk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs-compat-*.apk' | wc -l)" -eq 1
-          test "$(find release -maxdepth 1 -type f -name 'luci-app-smartdns-rs-compat_*.ipk' | wc -l)" -eq 1
+          test "$(find release -maxdepth 1 -type f -name "${CORE_PACKAGE}-*-openwrt-25.12-*.apk" | wc -l)" -eq 9
+          test "$(find release -maxdepth 1 -type f -name "${CORE_PACKAGE}-*-openwrt-24.10-*.ipk" | wc -l)" -eq 9
+          test "$(find release -maxdepth 1 -type f -name "${compat}-*-openwrt-25.12.apk" | wc -l)" -eq 1
+          test "$(find release -maxdepth 1 -type f -name "${compat}-*-openwrt-24.10.ipk" | wc -l)" -eq 1
+          test "$(find release -maxdepth 1 -type f | wc -l)" -eq 20
           (cd release && sha256sum -- * | sort -k2 > SHA256SUMS)
           cat .github/RELEASE_NOTES.md > release-notes.txt
           printf '%s\n' \
@@ -312,6 +325,8 @@ jobs:
             "版本 / Variant: $VARIANT_LABEL ($CORE_PACKAGE)" \
             "源码提交 / Source commit: $GITHUB_SHA" \
             "架构 / Architectures: aarch64_cortex-a53, aarch64_cortex-a72, aarch64_generic, arm_cortex-a7_neon-vfpv4, arm_cortex-a15_neon-vfpv4, i386_pentium4, mips_24kc, mipsel_24kc, x86_64" \
+            "包格式 / Formats: OpenWrt 24.10（opkg）安装 *-openwrt-24.10*.ipk，OpenWrt 25.12 及 snapshot（apk）安装 *-openwrt-25.12*.apk / Install *-openwrt-24.10*.ipk on OpenWrt 24.10 (opkg) and *-openwrt-25.12*.apk on OpenWrt 25.12 and snapshot (apk)" \
+            "LuCI: 只发布内置中文的 Lua 版 $compat，OpenWrt 24.10 起需先安装 luci-compat / Only the Lua LuCI app $compat is published, with Chinese built in; OpenWrt 24.10 and later need luci-compat first" \
             >> release-notes.txt
 
       - name: Create or update GitHub Release
