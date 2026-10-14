@@ -9,7 +9,7 @@ using main commit 657637e on 2026-09-13.
 | Report | Scope |
 |---|---|
 | [Latest three-way comparison](../../docs/PERFORMANCE.md) | One/two-core throughput, latency and memory on ARM64 and x86_64 |
-| [fastest-response refresh](fastest-response-refresh-20261014.md) | Background speed check after a fastest-response answer: answer quality, router throughput, unique-name flood |
+| [fastest-response speed check](fastest-response-refresh-20261014.md) | Speed check that continues a fastest-response lookup after its answer: upstream queries, answer quality, router throughput, unique-name flood |
 | [Passwall OOM regression](oom-regression-20260912.md) | Full rule lists, startup memory and IPSet reply timing |
 | [ARM PGO and LAN](wire-pgo-20260912.md) | Compiler training, CPU counters and physical LAN measurements |
 | [Single-core efficiency](router-efficiency-20260912.md) | Implementation choices and OxiDNS study |

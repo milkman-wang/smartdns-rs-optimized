@@ -3,11 +3,16 @@
 # Probes to the fake upstream's answer (192.0.2.1) are routed into a dummy
 # interface, so every ping/TCP probe waits for its timeout like an
 # unreachable server would. Run inside the dedicated benchmark namespace.
+# PERF_VARIANTS names the ./smartdns-<variant> binaries; the second round
+# runs them in reverse order.
 set -eu
 [ "$(ip netns identify $$)" = "${PERF_NETNS:-smartdns-flood}" ] || {
     echo "Run with ip netns exec in the dedicated benchmark namespace" >&2; exit 1;
 }
 cd "${PERF_DIR:-/tmp/smartdns-flood}"
+variants=${PERF_VARIANTS:-old new}
+reversed=
+for variant in $variants; do reversed="$variant $reversed"; done
 pid=; upstream=
 cleanup() {
     for process in "$pid" "$upstream"; do
@@ -36,8 +41,8 @@ upstream_count() { iptables -t mangle -nvxL OUTPUT | awk '/udp dpt:5301/ {print 
 
 : > flood-results.jsonl
 for round in 1 2; do
-    variants='old new'; [ "$round" != 2 ] || variants='new old'
-    for variant in $variants; do
+    order=$variants; [ "$round" != 2 ] || order=$reversed
+    for variant in $order; do
         label=flood-$variant-r$round
         cat > "$label.conf" <<EOF
 bind 127.0.0.1:5300
