@@ -69,29 +69,20 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
                     }
                 }
 
-                let rr_ttl_min = ctx
-                    .domain_rule
-                    .get_ref(|r| r.rr_ttl_min.as_ref())
-                    .cloned()
-                    .or_else(|| ctx.cfg().rr_ttl_min())
-                    .map(|i| i as u32);
-
-                let rr_ttl_max = ctx
-                    .domain_rule
-                    .get_ref(|r| r.rr_ttl_max.as_ref())
-                    .cloned()
-                    .or_else(|| ctx.cfg().rr_ttl_max())
-                    .map(|i| i as u32);
+                let ttl_limits = ctx.rr_ttl_limits();
                 let rr_ttl_reply_max = ctx.cfg().rr_ttl_reply_max().map(|i| i as u32);
 
-                if rr_ttl_min.is_some() || rr_ttl_max.is_some() || rr_ttl_reply_max.is_some() {
+                if ttl_limits.min.is_some()
+                    || ttl_limits.max.is_some()
+                    || rr_ttl_reply_max.is_some()
+                {
                     for record in lookup.answers_mut().iter_mut() {
-                        if let Some(rr_ttl_min) = rr_ttl_min {
+                        if let Some(rr_ttl_min) = ttl_limits.min {
                             record.set_min_ttl(rr_ttl_min);
                         }
                         if let Some(rr_ttl_reply_max) = rr_ttl_reply_max {
                             record.set_max_ttl(rr_ttl_reply_max);
-                        } else if let Some(rr_ttl_max) = rr_ttl_max {
+                        } else if let Some(rr_ttl_max) = ttl_limits.max {
                             record.set_max_ttl(rr_ttl_max);
                         }
                     }
@@ -544,6 +535,40 @@ mod tests {
 
         assert_eq!(lookup.max_ttl().unwrap(), 66);
         assert_eq!(lookup.min_ttl().unwrap(), 55);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_ttl_clip_domain_rule_rr_ttl() -> Result<(), DnsError> {
+        let cfg = RuntimeConfig::builder()
+            .with("rr-ttl-min 50")
+            .with("domain-rules /dns.google/ -rr-ttl 30")
+            .build()
+            .unwrap();
+
+        let mock = DnsMockMiddleware::mock(AddressMiddleware)
+            .with_multi_records(
+                "dns.google",
+                RecordType::A,
+                vec![
+                    Record::from_rdata(
+                        "dns.google".parse().unwrap(),
+                        96,
+                        RData::A("8.8.8.8".parse().unwrap()),
+                    ),
+                    Record::from_rdata(
+                        "dns.google".parse().unwrap(),
+                        48,
+                        RData::A("8.8.4.4".parse().unwrap()),
+                    ),
+                ],
+            )
+            .build(cfg);
+
+        let lookup = mock.lookup("dns.google", RecordType::A).await?;
+
+        assert!(lookup.record_iter().all(|r| r.ttl() == 30));
 
         Ok(())
     }

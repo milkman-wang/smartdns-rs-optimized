@@ -8,7 +8,8 @@ listed where they affect operation.
 
 | Configuration / behavior | Implementation |
 | --- | --- |
-| NXDOMAIN and NODATA caching | Stores the complete response, including SOA and CNAME records. Lifetime is bounded by SOA TTL, SOA MINIMUM and any CNAME TTL. Negative entries are never served stale or proactively refreshed. Responses without a usable SOA lifetime bypass negative caching. |
+| NXDOMAIN and NODATA caching | Stores the complete response, including SOA and CNAME records. Lifetime is bounded by SOA TTL, SOA MINIMUM and any CNAME TTL, then by the `rr-ttl` limits below. Negative entries are never served stale or proactively refreshed. Responses without a usable SOA lifetime bypass negative caching. |
+| `rr-ttl`, `rr-ttl-min`, `rr-ttl-max` | As in C SmartDNS, bound both reply TTLs and how long the cache keeps an answer, including negative answers. A fixed `rr-ttl`, the domain rule's first, sets both limits. A domain rule's limit replaces the global one and moves the opposite global limit it crosses. The minimum wins over a smaller maximum, and `0` means unset. `rr-ttl-reply-max` applies to replies only. |
 | `cache-size -1` | Automatic entry capacity based on 1% of physical memory, estimated at 1 KiB per entry, bounded to 512–1,048,576 entries. `0` disables caching. |
 | `cache-mem-size 16MiB` | Evicts LRU entries when their accounted DNS payload and record/cache storage exceed the budget. This is cache accounting, not a process RSS limit. `0` uses only the entry limit. |
 | `serve-expired-prefetch-time 300` | With stale serving and prefetch enabled, schedules positive-record refresh after expiry plus this interval. `0` selects half the stale lifetime, capped at eight hours; an unlimited stale lifetime uses eight hours. Failed refreshes release the in-flight marker and retry after the interval. |

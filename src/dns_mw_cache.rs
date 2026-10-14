@@ -203,6 +203,7 @@ impl DnsCacheMiddleware {
             return;
         }
         let cfg = ctx.cfg().clone();
+        let ttl_limits = ctx.rr_ttl_limits();
         let cache = self.cache.clone();
         let prefetch_notify = self.prefetch_notify.clone();
         let server_group_name = ctx.server_group_name().to_owned();
@@ -217,7 +218,7 @@ impl DnsCacheMiddleware {
                     .any(|record| record.record_type() == query.query_type())
                 && !crate::dns_mw_bogus::has_bogus_address(&cfg, &lookup)
             {
-                let ttl = lookup.min_ttl().unwrap_or(0);
+                let ttl = ttl_limits.apply(lookup.min_ttl().unwrap_or(0));
                 cache.insert_response(lookup, Instant::now(), ttl, &server_group_name);
                 if cfg.prefetch_domain() {
                     prefetch_notify
@@ -314,6 +315,9 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
         match res {
             Ok(lookup) => {
                 if let Some(ttl) = negative_response_ttl(&lookup) {
+                    // As in C SmartDNS, the rr-ttl limits bound negative
+                    // entries too.
+                    let ttl = ctx.rr_ttl_limits().apply(ttl);
                     if ttl > 0 && !ctx.no_cache {
                         self.cache.insert_response(
                             lookup.clone(),
@@ -335,11 +339,14 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
 
                 if !ctx.no_cache {
                     let server_group_name = ctx.server_group_name();
+                    // Keep the answer as long as the rr-ttl limits allow, as C
+                    // SmartDNS does; replies get the same limits.
+                    let ttl = lookup.min_ttl().map(|ttl| ctx.rr_ttl_limits().apply(ttl));
 
                     self.cache.insert_response(
                         lookup.clone(),
                         Instant::now(),
-                        lookup.min_ttl().unwrap_or(0),
+                        ttl.unwrap_or(0),
                         server_group_name,
                     );
 
@@ -351,7 +358,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                     }
 
                     if ctx.cfg().prefetch_domain()
-                        && let Some(ttl) = lookup.min_ttl()
+                        && let Some(ttl) = ttl
                     {
                         self.prefetch_notify
                             .notify_after(Duration::from_secs(ttl as u64))
@@ -2051,6 +2058,98 @@ mod tests {
             cached_ips(&cache, &query),
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
         );
+    }
+
+    fn remaining_lifetime(cache: &DnsCache, query: &Query) -> Duration {
+        cache
+            .cache
+            .lock()
+            .unwrap()
+            .peek(query)
+            .unwrap()
+            .valid_until
+            .saturating_duration_since(Instant::now())
+    }
+
+    #[tokio::test]
+    async fn test_rr_ttl_limits_set_the_cache_lifetime() {
+        use crate::dns_mw::DnsMockMiddleware;
+        use crate::libdns::proto::rr::rdata::SOA;
+
+        let query = Query::query("short.example.".parse().unwrap(), RecordType::A);
+        let mut answer = ip_response(&query, &["192.0.2.1"]);
+        answer.set_new_ttl(20);
+        let mut negative = DnsResponse::new_with_max_ttl(query.clone(), []);
+        negative.add_authority(Record::from_rdata(
+            "example.".parse().unwrap(),
+            20,
+            RData::SOA(SOA::new(
+                "ns.example.".parse().unwrap(),
+                "hostmaster.example.".parse().unwrap(),
+                1,
+                60,
+                60,
+                3600,
+                60,
+            )),
+        ));
+        for (directive, response, lifetime) in [
+            ("rr-ttl-min 600", &answer, 600),
+            ("rr-ttl-max 10", &answer, 10),
+            ("rr-ttl-min 600", &negative, 600),
+            ("rr-ttl-max 10", &negative, 10),
+        ] {
+            let cfg = Arc::new(
+                RuntimeConfig::builder()
+                    .with(directive)
+                    .with("prefetch-domain no")
+                    .with("cache-persist no")
+                    .build()
+                    .unwrap(),
+            );
+            let (_, handle) = DnsHandle::mock();
+            let middleware = DnsCacheMiddleware::new(&cfg, handle);
+            let cache = middleware.cache().clone();
+            let handler = DnsMockMiddleware::mock(middleware)
+                .with_result(query.clone(), Ok(response.clone()))
+                .build(cfg);
+            handler
+                .lookup(query.name().clone(), RecordType::A)
+                .await
+                .unwrap();
+            let remaining = remaining_lifetime(&cache, &query);
+            assert!(
+                remaining <= Duration::from_secs(lifetime)
+                    && remaining > Duration::from_secs(lifetime - 2),
+                "{directive}: {remaining:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_check_answer_gets_the_rr_ttl_limits() {
+        let SpeedCheckHarness {
+            handler,
+            cache,
+            mut checks,
+            ..
+        } = speed_check_harness(&["rr-ttl-max 60"], &["192.0.2.1", "192.0.2.2"]);
+        let query = Query::query("limited.example.".parse().unwrap(), RecordType::A);
+        handler
+            .lookup(query.name().clone(), RecordType::A)
+            .await
+            .unwrap();
+        let check = checks.recv().await.unwrap();
+        check.send(Ok(ip_response(&query, &["192.0.2.2"]))).unwrap();
+        let fastest: IpAddr = "192.0.2.2".parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while cached_ips(&cache, &query) != [fastest] {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the check must replace the entry");
+        assert!(remaining_lifetime(&cache, &query) <= Duration::from_secs(60));
     }
 
     #[test]

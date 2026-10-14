@@ -85,6 +85,68 @@ impl DnsContext {
             }
         }
     }
+
+    /// The `rr-ttl`, `rr-ttl-min` and `rr-ttl-max` limits for this query,
+    /// combined as in C SmartDNS. A fixed `rr-ttl`, the domain rule's first,
+    /// sets both. A domain rule's limit replaces the global one and also moves
+    /// the opposite global limit it crosses. The minimum wins over a smaller
+    /// maximum, and zero means unset.
+    pub fn rr_ttl_limits(&self) -> TtlLimits {
+        let set = |ttl: Option<u64>| {
+            ttl.filter(|&ttl| ttl > 0)
+                .map(|ttl| u32::try_from(ttl).unwrap_or(u32::MAX))
+        };
+        let fixed =
+            set(self.domain_rule.get(|rule| rule.rr_ttl)).or_else(|| set(self.cfg.rr_ttl()));
+        if let Some(ttl) = fixed {
+            return TtlLimits {
+                min: Some(ttl),
+                max: Some(ttl),
+            };
+        }
+
+        let rule_min = set(self.domain_rule.get(|rule| rule.rr_ttl_min));
+        let rule_max = set(self.domain_rule.get(|rule| rule.rr_ttl_max));
+        let global_min = set(self.cfg.rr_ttl_min());
+        let global_max = set(self.cfg.rr_ttl_max());
+        let mut limits = TtlLimits {
+            min: global_min,
+            max: global_max,
+        };
+        if let Some(min) = rule_min {
+            limits.min = Some(min);
+            if global_max.is_some_and(|max| max <= min) {
+                limits.max = Some(min);
+            }
+        }
+        if let Some(max) = rule_max {
+            limits.max = Some(max);
+            if rule_min.is_none() && global_min.is_some_and(|min| min >= max) {
+                limits.min = Some(max);
+            }
+        }
+        if let (Some(min), Some(max)) = (limits.min, limits.max)
+            && max < min
+        {
+            limits.max = Some(min);
+        }
+        limits
+    }
+}
+
+/// How long an answer may live. Replies and cache entries use the same
+/// limits, as in C SmartDNS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TtlLimits {
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+}
+
+impl TtlLimits {
+    pub fn apply(self, ttl: u32) -> u32 {
+        let ttl = self.max.map_or(ttl, |max| ttl.min(max));
+        self.min.map_or(ttl, |min| ttl.max(min))
+    }
 }
 
 /// The rest of a `fastest-response` lookup that already returned its first
@@ -814,6 +876,84 @@ impl DefaultSOA for RData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ttl_limits(directives: &[&str]) -> TtlLimits {
+        let cfg = directives
+            .iter()
+            .fold(RuntimeConfig::builder(), |builder, directive| {
+                builder.with(directive)
+            })
+            .build()
+            .unwrap();
+        let name: Name = "www.example.com.".parse().unwrap();
+        DnsContext::new(&name, Arc::new(cfg), Default::default()).rr_ttl_limits()
+    }
+
+    fn limits(min: Option<u32>, max: Option<u32>) -> TtlLimits {
+        TtlLimits { min, max }
+    }
+
+    #[test]
+    fn rr_ttl_limits_combine_like_c() {
+        assert_eq!(ttl_limits(&[]), limits(None, None));
+        assert_eq!(ttl_limits(&["rr-ttl-min 600"]), limits(Some(600), None));
+        assert_eq!(
+            ttl_limits(&["rr-ttl-min 0", "rr-ttl-max 0"]),
+            limits(None, None),
+            "zero means unset"
+        );
+        assert_eq!(
+            ttl_limits(&["rr-ttl-min 600", "rr-ttl-max 300"]),
+            limits(Some(600), Some(600)),
+            "the minimum wins"
+        );
+        assert_eq!(
+            ttl_limits(&["rr-ttl 120", "rr-ttl-min 600"]),
+            limits(Some(120), Some(120)),
+            "a fixed rr-ttl overrides the limits"
+        );
+        assert_eq!(
+            ttl_limits(&[
+                "rr-ttl-min 600",
+                "rr-ttl-max 900",
+                "domain-rules /example.com/ -rr-ttl 30"
+            ]),
+            limits(Some(30), Some(30)),
+            "a domain rule's rr-ttl applies to its subdomains"
+        );
+        assert_eq!(
+            ttl_limits(&[
+                "rr-ttl-max 600",
+                "domain-rules /example.com/ -rr-ttl-min 900"
+            ]),
+            limits(Some(900), Some(900)),
+            "a rule minimum above the global maximum moves it"
+        );
+        assert_eq!(
+            ttl_limits(&[
+                "rr-ttl-min 300",
+                "domain-rules /example.com/ -rr-ttl-max 60"
+            ]),
+            limits(Some(60), Some(60)),
+            "a rule maximum below the global minimum moves it"
+        );
+        assert_eq!(
+            ttl_limits(&[
+                "rr-ttl-min 300",
+                "domain-rules /example.com/ -rr-ttl-min 30 -rr-ttl-max 60"
+            ]),
+            limits(Some(30), Some(60))
+        );
+    }
+
+    #[test]
+    fn ttl_limits_bound_a_ttl() {
+        assert_eq!(limits(None, None).apply(20), 20);
+        assert_eq!(limits(Some(600), None).apply(20), 600);
+        assert_eq!(limits(Some(600), None).apply(3600), 3600);
+        assert_eq!(limits(None, Some(60)).apply(3600), 60);
+        assert_eq!(limits(Some(30), Some(60)).apply(0), 30);
+    }
 
     #[test]
     fn prepared_encoding_is_invalidated_by_ttl_records_and_edns_changes() {
