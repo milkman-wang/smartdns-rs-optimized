@@ -20,6 +20,7 @@ local o
 
 o = s:taboption("general", Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:taboption("general", Value, "name", translate("Name"))
 

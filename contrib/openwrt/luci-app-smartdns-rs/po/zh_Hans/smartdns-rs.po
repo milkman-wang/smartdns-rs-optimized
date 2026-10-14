@@ -1727,3 +1727,21 @@ msgstr "配置更改已应用。"
 
 msgid "Downloaded domain lists take effect only after their /etc/smartdns/domain-set/NAME path is selected in a domain forwarding or blocking rule."
 msgstr "下载域名列表后，请在域名分流或屏蔽规则中引用 /etc/smartdns/domain-set/文件名，规则才会生效。"
+
+msgid "Download URLs must start with http:// or https://."
+msgstr "下载地址必须以 http:// 或 https:// 开头。"
+
+msgid "This file is too large or unreadable to edit here; change it over SSH."
+msgstr "文件过大或无法读取，不能在此编辑，请通过 SSH 修改。"
+
+msgid "Other"
+msgstr "其他"
+
+msgid "Updating files failed; see the system log."
+msgstr "文件更新失败，请查看系统日志。"
+
+msgid "Fatal"
+msgstr "致命"
+
+msgid "Notice"
+msgstr "通知"

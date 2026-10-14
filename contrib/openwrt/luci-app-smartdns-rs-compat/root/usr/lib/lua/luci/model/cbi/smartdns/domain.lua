@@ -20,6 +20,7 @@ local o
 
 o = s:taboption("general", Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:taboption("general", Value, "name", translate("Name"))
 
@@ -38,7 +39,7 @@ o:value("all", translate("IPv4 and IPv6"))
 o:value("ipv4", translate("IPv4"))
 o:value("ipv6", translate("IPv6"))
 
-o = s:taboption("advanced", ListValue, "speed_check_mode", translate("Speed Check Mode"))
+o = s:taboption("advanced", Value, "speed_check_mode", translate("Speed Check Mode"))
 o:value("", translate("Default"))
 o:value("ping,tcp:80,tcp:443")
 o:value("ping,tcp:443,tcp:80")

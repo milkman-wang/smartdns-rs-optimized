@@ -356,8 +356,10 @@ o.placeholder = "/tmp/smartdns"
 
 o = s:taboption("custom", ListValue, "log_level", translate("Log Level"))
 o.default = "warn"
+o:value("fatal", translate("Fatal"))
 o:value("error", translate("Error"))
 o:value("warn", translate("Warning"))
+o:value("notice", translate("Notice"))
 o:value("info", translate("Information"))
 o:value("debug", translate("Debug"))
 
@@ -419,6 +421,7 @@ end
 
 o = s:option(Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:option(DummyValue, "name", translate("Name"))
 o = s:option(DummyValue, "ip", translate("Address or URL"))
@@ -450,6 +453,7 @@ end
 
 o = s:option(Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:option(DummyValue, "client_addr", translate("Client Address"))
 function o.cfgvalue(self, section)
@@ -471,7 +475,7 @@ m.uci:foreach("smartdns", "server", function(server)
 	if server.server_group then o:value(server.server_group) end
 end)
 
-o = s:taboption("forward", ListValue, "speed_check_mode", translate("Speed Check Mode"))
+o = s:taboption("forward", Value, "speed_check_mode", translate("Speed Check Mode"))
 o:value("", translate("Default"))
 o:value("ping,tcp:80,tcp:443")
 o:value("ping,tcp:443,tcp:80")
@@ -532,6 +536,7 @@ end
 
 o = s:option(Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:option(DummyValue, "name", translate("Name"))
 
@@ -562,6 +567,7 @@ end
 
 o = s:option(Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:option(DummyValue, "name", translate("Name"))
 
@@ -646,6 +652,7 @@ o:value("list", translate("Domain List"))
 o:value("config", translate("Configuration"))
 o:value("ip-set", translate("IP Set"))
 o:value("hosts", translate("Hosts"))
+o:value("other", translate("Other"))
 
 o = s:option(Value, "desc", translate("Description"))
 o.size = 16

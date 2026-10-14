@@ -15,7 +15,7 @@ return view.extend({
 
 		poll.add(function() {
 			return fs.exec(helper, [ 'tail' ]).then(function(res) {
-				dom.content(output, [ res.stdout.trim() || _('Log is clean.') ]);
+				dom.content(output, [ (res.stdout || '').trim() || _('Log is clean.') ]);
 				output.scrollTop = output.scrollHeight;
 			}).catch(function(err) {
 				dom.content(output, [ _('Unable to read log: %s').format(err) ]);

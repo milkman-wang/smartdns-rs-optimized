@@ -38,6 +38,7 @@ SERVICE_PORT=6053
 AUTO_SET_DNSMASQ=1
 COREDUMP=0
 GLOBAL_LOADED=0
+GLOBAL_FAILED=0
 DNSMASQ_CHANGED=0
 DOWNLOAD_FAILED=0
 
@@ -406,7 +407,8 @@ load_client_rule()
 	local enabled args value file
 	args=""
 
-	config_get_bool enabled "$section" enabled 0
+	# LuCI shows a rule without the option as enabled.
+	config_get_bool enabled "$section" enabled 1
 	[ "$enabled" = "1" ] || return 0
 	conf_append group-begin "client-$section"
 	config_list_foreach "$section" client_addr client_addr_append
@@ -483,23 +485,24 @@ load_domain_rule()
 load_domain_rule_list()
 {
 	local section="$1"
-	local enabled args value file
+	local enabled args value file block
 	args=""
 
-	config_get_bool enabled "$section" enabled 0
+	# LuCI shows a rule without the option as enabled.
+	config_get_bool enabled "$section" enabled 1
 	[ "$enabled" = "1" ] || return 0
 	config_get file "$section" domain_list_file
 	[ -n "$file" ] && [ -f "$file" ] || return 0
 	config_get value "$section" server_group
 	[ -n "$value" ] && args="$args -nameserver $value"
-	config_get value "$section" block_domain_type
-	case "$value" in all) args="$args -address #" ;; ipv4) args="$args -address #4" ;; ipv6) args="$args -address #6" ;; esac
+	config_get block "$section" block_domain_type
 	config_get value "$section" speed_check_mode
 	[ -n "$value" ] && args="$args -speed-check-mode $value"
 	config_get value "$section" dualstack_ip_selection
 	[ -n "$value" ] && args="$args -dualstack-ip-selection $value"
 	config_get_bool value "$section" force_aaaa_soa 0
-	[ "$value" = "1" ] && args="$args -address #6"
+	value="$(rule_address "$block" "$value")"
+	[ -n "$value" ] && args="$args -address $value"
 	config_get value "$section" nftset_name
 	[ -n "$value" ] && args="$args -nftset $value"
 	config_get value "$section" ipset_name
@@ -511,6 +514,22 @@ load_domain_rule_list()
 	[ -n "$args" ] || return 0
 	conf_append domain-set "-name domain-$section -file $file"
 	conf_append domain-rules "/domain-set:domain-$section/$args"
+}
+
+# SmartDNS keeps only the last -address of a rule, so the block type and a
+# forced AAAA SOA must be combined into one value.
+rule_address()
+{
+	local block="$1" force_aaaa="$2" ipv4=0 ipv6=0
+	case "$block" in all) ipv4=1; ipv6=1 ;; ipv4) ipv4=1 ;; ipv6) ipv6=1 ;; esac
+	[ "$force_aaaa" = "1" ] && ipv6=1
+	if [ "$ipv4$ipv6" = "11" ]; then
+		echo '#'
+	elif [ "$ipv4" = "1" ]; then
+		echo '#4'
+	elif [ "$ipv6" = "1" ]; then
+		echo '#6'
+	fi
 }
 
 ip_rule_addr_append()
@@ -533,7 +552,8 @@ load_ip_rule()
 	local section="$1"
 	local enabled file set_name
 
-	config_get_bool enabled "$section" enabled 0
+	# LuCI shows a rule without the option as enabled.
+	config_get_bool enabled "$section" enabled 1
 	[ "$enabled" = "1" ] || return 0
 	config_get_bool IP_WHITELIST "$section" whitelist_ip 0
 	config_get_bool IP_BLACKLIST "$section" blacklist_ip 0
@@ -757,9 +777,10 @@ generate_config()
 	AUTO_SET_DNSMASQ=1
 	COREDUMP=0
 	GLOBAL_LOADED=0
+	GLOBAL_FAILED=0
 
 	config_load smartdns
-	config_foreach load_global smartdns
+	config_foreach load_global_checked smartdns
 	config_foreach load_server server
 	config_foreach load_client_rule client-rule
 	config_foreach load_domain_rule domain-rule
@@ -769,7 +790,19 @@ generate_config()
 	conf_append_file conf-file "$ADDRESS_CONF"
 	conf_append_file conf-file "$BLACKLIST_CONF"
 	conf_append_file conf-file "$CUSTOM_CONF"
+	# A global section that stopped part-way lacks its listeners; it must not
+	# pass validation and replace the running configuration.
+	if [ "$GLOBAL_FAILED" = "1" ]; then
+		logger -t smartdns-rs "global settings could not be applied; configuration not generated"
+		return 1
+	fi
 	return 0
+}
+
+# config_foreach ignores callback failures.
+load_global_checked()
+{
+	load_global "$@" || GLOBAL_FAILED=1
 }
 
 validate_config()
@@ -902,7 +935,8 @@ download_file()
 		list) target="$DOMAIN_SET_DIR/$name" ;;
 		config) target="$CONF_DOWNLOAD_DIR/$name" ;;
 		ip-set) target="$IP_SET_DIR/$name" ;;
-		hosts) target="$DOWNLOAD_DIR/$name" ;;
+		# "other" comes from the original LuCI app.
+		hosts|other) target="$DOWNLOAD_DIR/$name" ;;
 		*)
 			DOWNLOAD_FAILED=1
 			logger -t smartdns-rs "reject unsupported download type: $type"

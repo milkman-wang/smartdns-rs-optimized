@@ -113,6 +113,16 @@ function validatePacketMark(sectionId, value) {
 	return true;
 }
 
+function validateDownloadUrl(sectionId, value) {
+	if (!value || /^https?:\/\/[^\s\/?#]+\S*$/.test(value))
+		return true;
+	return _('Download URLs must start with http:// or https://.');
+}
+
+// uhttpd accepts ubus requests of up to 64 KiB and rpcd does not read files of
+// 256 KiB or more, so larger files are shown read-only.
+var TEXT_FILE_EDIT_LIMIT = 48 * 1024;
+
 function textFileOption(section, tab, name, title, description, path, rows) {
 	var o = tab != null
 		? section.taboption(tab, form.TextValue, name, title, description)
@@ -122,14 +132,35 @@ function textFileOption(section, tab, name, title, description, path, rows) {
 	// Soft wrapping keeps long rules selectable without horizontal dragging.
 	// It does not insert line breaks into the saved configuration.
 	o.wrap = true;
-	o.cfgvalue = function() {
-		return L.resolveDefault(fs.trimmed(path), '');
+	// Read the file once. parse() compares the editor with this text, so saving
+	// other settings leaves an untouched file alone.
+	o.load = function(sectionId) {
+		var self = this;
+		return fs.trimmed(path).catch(function(err) {
+			if (!err || err.name != 'NotFoundError')
+				self.unreadable = true;
+			return '';
+		}).then(function(content) {
+			if (self.unreadable || new Blob([ content ]).size > TEXT_FILE_EDIT_LIMIT) {
+				// Saving an editor that does not hold the whole file would
+				// truncate it.
+				self.unreadable = true;
+				self.readonly = true;
+				self.description = _('This file is too large or unreadable to edit here; change it over SSH.');
+			}
+			return content;
+		});
 	};
 	o.write = function(sectionId, value) {
+		if (this.unreadable)
+			return Promise.resolve();
 		value = (value || '').trim().replace(/\r\n/g, '\n');
 		return fs.write(path, value ? value + '\n' : '');
 	};
 	o.remove = function(sectionId) {
+		// An editor that stayed empty needs no write.
+		if (this.data && this.data[sectionId] === '')
+			return Promise.resolve();
 		return this.write(sectionId, '');
 	};
 	return o;
@@ -508,13 +539,14 @@ return view.extend({
 		so.validate = validateDownloadName;
 		so.rmempty = false;
 		so = ss.option(form.Value, 'url', _('URL'));
-		so.datatype = 'url';
+		so.validate = validateDownloadUrl;
 		so.rmempty = false;
 		so = ss.option(form.ListValue, 'type', _('Type'));
 		so.value('list', _('Domain List'));
 		so.value('config', _('Configuration'));
 		so.value('ip-set', _('IP Set'));
 		so.value('hosts', _('Hosts'));
+		so.value('other', _('Other'));
 		so.rmempty = false;
 		so = ss.option(form.Value, 'desc', _('Description'));
 		so = ss.option(form.Flag, 'use_proxy', _('Use Proxy'));
@@ -524,7 +556,11 @@ return view.extend({
 		o.inputstyle = 'apply';
 		o.onclick = function() {
 			return fs.exec('/etc/init.d/smartdns', [ 'updatefiles' ]).then(function(res) {
+				if (res.code !== 0)
+					throw new Error(res.stderr || res.stdout || _('Updating files failed; see the system log.'));
 				ui.addNotification(null, E('p', {}, [ res.stdout || _('Files updated.') ]));
+			}).catch(function(err) {
+				ui.addNotification(null, E('p', {}, [ err.message ]), 'error');
 			});
 		};
 
@@ -580,8 +616,10 @@ return view.extend({
 		o.placeholder = "/tmp/smartdns";
 
 		o = s.taboption('custom', form.ListValue, 'log_level', _('Log Level'));
+		o.value('fatal', _('Fatal'));
 		o.value('error', _('Error'));
 		o.value('warn', _('Warning'));
+		o.value('notice', _('Notice'));
 		o.value('info', _('Information'));
 		o.value('debug', _('Debug'));
 		o.default = 'warn';
@@ -628,6 +666,7 @@ return view.extend({
 		s.tab('advanced', _('Advanced Settings'));
 		o = s.taboption('general', form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
+		o.rmempty = false;
 		o.editable = true;
 		o = s.taboption('general', form.Value, 'name', _('Name'));
 		o = s.taboption('general', form.Value, 'ip', _('Address or URL'),
@@ -678,14 +717,16 @@ return view.extend({
 		s.tab('block', _('DNS Block Setting'));
 		o = s.taboption('general', form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
+		o.rmempty = false;
 		o.editable = true;
 		o = s.taboption('general', form.DynamicList, 'client_addr', _('Client Address'),
 			_('IPv4/IPv6 subnet or MAC address.'));
 		o.rmempty = false;
 		o = s.taboption('general', form.Value, 'server_group', _('Server Group'));
 		groups.forEach(function(group) { o.value(group); });
-		o = s.taboption('advanced', form.ListValue, 'speed_check_mode', _('Speed Check Mode'));
-		addSpeedModes(o, true);
+		o = s.taboption('advanced', form.Value, 'speed_check_mode', _('Speed Check Mode'));
+		addSpeedModes(o, false);
+		o.placeholder = _('Default');
 		o.modalonly = true;
 		o = s.taboption('advanced', form.ListValue, 'dualstack_ip_selection', _('Dual-stack Selection'));
 		o.value('', _('Default'));
@@ -717,8 +758,9 @@ return view.extend({
 		s.tab('address', _('Domain Address'));
 		o = s.taboption('forward', form.Value, 'server_group', _('Server Group'));
 		groups.forEach(function(group) { o.value(group); });
-		o = s.taboption('forward', form.ListValue, 'speed_check_mode', _('Speed Check Mode'));
-		addSpeedModes(o, true);
+		o = s.taboption('forward', form.Value, 'speed_check_mode', _('Speed Check Mode'));
+		addSpeedModes(o, false);
+		o.placeholder = _('Default');
 		o = s.taboption('forward', form.ListValue, 'dualstack_ip_selection', _('Dual-stack Selection'));
 		o.value('', _('Default'));
 		o.value('yes', _('Yes'));
@@ -754,6 +796,7 @@ return view.extend({
 		s.tab('advanced', _('Advanced Settings'));
 		o = s.taboption('general', form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
+		o.rmempty = false;
 		o.editable = true;
 		o = s.taboption('general', form.Value, 'name', _('Name'));
 		o = s.taboption('general', form.FileUpload, 'domain_list_file', _('Domain List File'));
@@ -766,8 +809,9 @@ return view.extend({
 		o.value('all', _('IPv4 and IPv6'));
 		o.value('ipv4', _('IPv4'));
 		o.value('ipv6', _('IPv6'));
-		o = s.taboption('advanced', form.ListValue, 'speed_check_mode', _('Speed Check Mode'));
-		addSpeedModes(o, true);
+		o = s.taboption('advanced', form.Value, 'speed_check_mode', _('Speed Check Mode'));
+		addSpeedModes(o, false);
+		o.placeholder = _('Default');
 		o.modalonly = true;
 		o = s.taboption('advanced', form.ListValue, 'dualstack_ip_selection', _('Dual-stack Selection'));
 		o.value('', _('Default'));
@@ -807,6 +851,7 @@ return view.extend({
 		s.tab('advanced', _('Advanced Settings'));
 		o = s.taboption('general', form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
+		o.rmempty = false;
 		o.editable = true;
 		o = s.taboption('general', form.Value, 'name', _('Name'));
 		o = s.taboption('general', form.DynamicList, 'ip_addr', _('IP Addresses'));

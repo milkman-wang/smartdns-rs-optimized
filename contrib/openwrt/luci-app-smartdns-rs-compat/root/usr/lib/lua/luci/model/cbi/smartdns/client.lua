@@ -21,6 +21,7 @@ local o
 
 o = s:taboption("general", Flag, "enabled", translate("Enable"))
 o.default = "1"
+o.rmempty = false
 
 o = s:taboption("general", DynamicList, "client_addr", translate("Client Address"), translate("IPv4/IPv6 subnet or MAC address."))
 o.rmempty = false
@@ -30,7 +31,7 @@ m.uci:foreach("smartdns", "server", function(server)
 	if server.server_group then o:value(server.server_group) end
 end)
 
-o = s:taboption("advanced", ListValue, "speed_check_mode", translate("Speed Check Mode"))
+o = s:taboption("advanced", Value, "speed_check_mode", translate("Speed Check Mode"))
 o:value("", translate("Default"))
 o:value("ping,tcp:80,tcp:443")
 o:value("ping,tcp:443,tcp:80")
