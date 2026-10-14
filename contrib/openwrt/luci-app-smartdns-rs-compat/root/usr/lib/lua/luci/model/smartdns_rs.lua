@@ -9,10 +9,33 @@ local M = {}
 
 function M.text_file(option, path)
 	function option.cfgvalue() return fs.readfile(path) or "" end
+	-- Browsers submit CRLF line breaks, so even an untouched editor differs
+	-- from the file. Only write real changes.
 	function option.write(self, section, value)
-		assert(fs.writefile(path, (value or ""):gsub("\r\n", "\n")))
+		value = (value or ""):gsub("\r\n", "\n")
+		if value ~= (fs.readfile(path) or "") then
+			assert(fs.writefile(path, value))
+		end
 	end
 	function option.remove(self, section) self:write(section, "") end
+end
+
+-- File editors save while the form is parsed, which leaves Save & Apply no
+-- UCI change to apply: it would report nothing to apply and skip the reload.
+-- Reload the service instead, as the JavaScript UI does.
+function M.apply_files(map)
+	function map.commit_handler(self)
+		local http, sys = require "luci.http", require "luci.sys"
+		if not http.formvalue("cbi.apply") then return end
+		for _, config in ipairs(self.parsechain) do
+			-- UCI changes reload the service through procd.
+			if next(self.uci:changes(config) or {}) then return end
+		end
+		self.apply_needed = false
+		local ok = sys.call("/etc/init.d/smartdns reload >/dev/null 2>&1") == 0
+		self.message = translate(ok and "Configuration changes applied."
+			or "Configuration validation failed. Please check the system log.")
+	end
 end
 
 -- CBI stages multipart uploads here on both Lua LuCI and luci-compat.

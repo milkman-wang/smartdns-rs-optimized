@@ -3,6 +3,7 @@ local sys = require "luci.sys"
 local helpers = require "luci.model.smartdns_rs"
 local m = Map("smartdns", translate("SmartDNS-rs"))
 m.template = "smartdns/map"
+helpers.apply_files(m)
 local s, o
 s = m:section(SimpleSection)
 s.template = "smartdns/status"

@@ -1733,3 +1733,6 @@ msgstr "通知"
 
 msgid "Other"
 msgstr "其他"
+
+msgid "Configuration changes applied."
+msgstr "配置更改已应用。"

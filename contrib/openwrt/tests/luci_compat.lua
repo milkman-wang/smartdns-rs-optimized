@@ -3,6 +3,7 @@ local root = "contrib/openwrt/luci-app-smartdns-rs-compat/root/usr/lib/lua/luci/
 package.path = root .. "../?.lua;" .. package.path
 local files, commands = {}, {}
 local command_output = "command output"
+local call_status = 0
 package.preload["nixio.fs"] = function()
 	return {
 		readfile = function(path) return files[path] end,
@@ -19,7 +20,10 @@ package.preload["luci.i18n"] = function()
 	return {translate = translate, loadc = function(name) assert(name == "smartdns-rs-compat") end}
 end
 package.preload["luci.sys"] = function()
-	return {exec = function(command) commands[#commands + 1] = command; return command_output end}
+	return {
+		exec = function(command) commands[#commands + 1] = command; return command_output end,
+		call = function(command) commands[#commands + 1] = command; return call_status end
+	}
 end
 
 local helpers = require "luci.model.smartdns_rs"
@@ -137,6 +141,32 @@ assert(files["/etc/smartdns/custom.conf"] == "cache-size 8192\n")
 assert(editor:cfgvalue() == "cache-size 8192\n")
 editor:remove("cfg01")
 assert(files["/etc/smartdns/custom.conf"] == "")
+
+-- Save & Apply after file-only edits reloads the service instead of applying
+-- an empty UCI change set, which would report that nothing changed.
+local form, changes = {}, {}
+package.loaded["luci.http"] = {formvalue = function(name) return form[name] end}
+model.parsechain = {"smartdns"}
+model.uci.changes = function(self, config) return changes[config] end
+for _, case in ipairs({
+	{nil, {}, 0, true, nil},
+	{"1", {}, 0, false, "Configuration changes applied."},
+	{"1", {}, 1, false, "Configuration validation failed. Please check the system log."},
+	{"1", {smartdns = {{"set", "cfg01", "port", "53"}}}, 0, true, nil}
+}) do
+	form["cbi.apply"], changes, call_status = case[1], case[2], case[3]
+	model.apply_needed, model.message = true, nil
+	local issued = #commands
+	model:commit_handler()
+	assert(model.apply_needed == case[4])
+	assert(model.message == case[5])
+	assert(#commands == issued + (case[4] and 0 or 1))
+	if not case[4] then
+		assert(commands[#commands] == "/etc/init.d/smartdns reload >/dev/null 2>&1")
+	end
+end
+package.loaded["luci.http"] = nil
+call_status = 0
 
 local upload = option("smartdns", "upload_list_file")
 for _, name in ipairs({"upload_conf_file", "upload_list_file", "upload_other_file"}) do
