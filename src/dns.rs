@@ -6,6 +6,8 @@ use std::fmt::Debug;
 use std::net::IpAddr;
 use std::{str::FromStr, sync::Arc, time::Duration};
 
+use futures::future::BoxFuture;
+
 use crate::dns_error::LookupError;
 use crate::dns_rule::DomainRuleTreeNode;
 
@@ -33,6 +35,7 @@ pub struct DnsContext {
     pub source: LookupFrom,
     pub no_cache: bool,
     pub is_dualstack: bool,
+    pub pending_speed_check: PendingSpeedCheck,
 }
 
 impl DnsContext {
@@ -50,6 +53,7 @@ impl DnsContext {
             source: Default::default(),
             no_cache,
             is_dualstack: false,
+            pending_speed_check: Default::default(),
         }
     }
 
@@ -80,6 +84,30 @@ impl DnsContext {
                 "default"
             }
         }
+    }
+}
+
+/// The rest of a `fastest-response` lookup that already returned its first
+/// upstream answer. It waits for the other upstreams of the same lookup,
+/// probes every address and resolves to the answer for the fastest one.
+/// Dropping it cancels the lookup.
+#[derive(Default)]
+pub struct PendingSpeedCheck(Option<BoxFuture<'static, Result<DnsResponse, DnsError>>>);
+
+impl PendingSpeedCheck {
+    pub fn set(&mut self, lookup: BoxFuture<'static, Result<DnsResponse, DnsError>>) {
+        self.0 = Some(lookup);
+    }
+
+    pub fn take(&mut self) -> Option<BoxFuture<'static, Result<DnsResponse, DnsError>>> {
+        self.0.take()
+    }
+}
+
+/// A cloned context runs a lookup of its own, so it starts without one.
+impl Clone for PendingSpeedCheck {
+    fn clone(&self) -> Self {
+        Self::default()
     }
 }
 

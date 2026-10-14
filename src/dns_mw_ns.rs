@@ -11,6 +11,7 @@ use crate::{
     config::{ResponseMode, SpeedCheckMode, SpeedCheckModeList},
     dns::*,
     dns_client::{DnsClient, GenericResolver, NameServerGroup},
+    dns_conf::RuntimeConfig,
     dns_error::LookupError,
     log::{debug, error},
     middleware::*,
@@ -18,17 +19,31 @@ use crate::{
 
 use crate::libdns::proto::rr::domain::usage::LOCAL;
 use crate::libdns::proto::{AuthorityData, op::ResponseCode, rr::rdata::opt::EdnsCode};
-use futures::{FutureExt, future::BoxFuture};
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Either, select},
+};
 use rr::rdata::opt::EdnsOption;
+use tokio::sync::{Semaphore, oneshot};
 use tokio::time::sleep;
+
+/// Lookups that may go on probing after their first answer at once. Beyond
+/// this, as under a flood of unique names, lookups answer as plain
+/// `fastest-response` and their entries stay unprobed until prefetch or expiry
+/// refreshes them.
+const MAX_DEFERRED_SPEED_CHECKS: usize = 128;
 
 pub struct NameServerMiddleware {
     client: DnsClient,
+    deferred_speed_checks: Arc<Semaphore>,
 }
 
 impl NameServerMiddleware {
     pub fn new(client: DnsClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            deferred_speed_checks: Arc::new(Semaphore::new(MAX_DEFERRED_SPEED_CHECKS)),
+        }
     }
 }
 
@@ -120,6 +135,30 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
         ctx.source = LookupFrom::Server(group_name.to_string());
 
         if rtype.is_ip_addr() {
+            if let Some(speed_check_mode) = deferred_speed_check_mode(ctx, req)
+                && let Ok(permit) = self.deferred_speed_checks.clone().try_acquire_owned()
+            {
+                let (first, rest) = lookup_ip_answering_first(
+                    name_server,
+                    name.clone(),
+                    ctx.cfg().clone(),
+                    speed_check_mode.clone(),
+                    lookup_options,
+                )
+                .await;
+                if let Some(rest) = rest {
+                    let group_name = group_name.clone();
+                    ctx.pending_speed_check.set(
+                        async move {
+                            let _permit = permit;
+                            rest.await.map(|res| res.with_name_server_group(group_name))
+                        }
+                        .boxed(),
+                    );
+                }
+                return first.map(|res| res.with_name_server_group(group_name));
+            }
+
             let cfg = ctx.cfg();
 
             let mut opts = LookupIpOptions {
@@ -152,27 +191,93 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
     }
 }
 
-/// Whether a `fastest-response` answer should be followed by a background
-/// speed check. The client keeps the unprobed upstream answer; the refresh runs
-/// as `fastest-ip` (see `is_background` above) and replaces the cache entry, so
-/// later queries get the fastest address. A `none` speed check mode keeps the
-/// plain `fastest-response` behaviour.
-pub(crate) fn refines_cache_by_speed_check(ctx: &DnsContext) -> bool {
+/// The probe modes of a `fastest-response` lookup that should keep its speed
+/// check running after the first answer, as C SmartDNS does: the client gets
+/// the first upstream answer, and the cache keeps the fastest address once the
+/// probes finish (see `PendingSpeedCheck`). Only lookups whose answer the cache
+/// stores qualify. `speed-check-mode none` keeps plain `fastest-response`.
+fn deferred_speed_check_mode<'a>(
+    ctx: &'a DnsContext,
+    req: &DnsRequest,
+) -> Option<&'a SpeedCheckModeList> {
     let cfg = ctx.cfg();
     let response_mode = ctx
         .domain_rule
         .get(|rule| rule.response_mode)
         .unwrap_or_else(|| cfg.response_mode());
-    let speed_check_mode = ctx
-        .domain_rule
+    if response_mode != ResponseMode::FastestResponse
+        || ctx.server_opts.no_speed_check()
+        || ctx.server_opts.is_background
+        // Dual-stack selection only compares the other family's answer.
+        || ctx.is_dualstack
+        || cfg.cache_size() == 0
+        || ctx.no_cache
+        || ctx.server_opts.no_cache()
+        || req.is_dnssec()
+    {
+        return None;
+    }
+
+    ctx.domain_rule
         .as_ref()
         .and_then(|rule| rule.speed_check_mode.as_ref())
-        .or_else(|| cfg.speed_check_mode());
+        .or_else(|| cfg.speed_check_mode())
+        .filter(|modes| !modes.is_empty() && !modes.iter().any(|m| m.is_none()))
+}
 
-    response_mode == ResponseMode::FastestResponse
-        && !ctx.server_opts.no_speed_check()
-        && speed_check_mode
-            .is_some_and(|modes| !modes.is_empty() && !modes.iter().any(|m| m.is_none()))
+/// Returns the first valid upstream answer, as `fastest-response` does, and
+/// the rest of the same lookup, which goes on as `fastest-ip`: it waits for the
+/// other upstreams, probes every address and resolves to the answer for the
+/// fastest one. No upstream is queried twice.
+async fn lookup_ip_answering_first(
+    server: Arc<NameServerGroup>,
+    name: Name,
+    cfg: Arc<RuntimeConfig>,
+    speed_check_mode: SpeedCheckModeList,
+    lookup_options: LookupOptions,
+) -> (
+    Result<DnsResponse, LookupError>,
+    Option<BoxFuture<'static, Result<DnsResponse, LookupError>>>,
+) {
+    if server.servers.is_empty() {
+        return (Err(ProtoErrorKind::NoConnections.into()), None);
+    }
+
+    let (first_tx, mut first_rx) = oneshot::channel();
+    let mut lookup = async move {
+        let options = LookupIpOptions {
+            response_strategy: ResponseMode::FastestIp,
+            speed_check_mode: Some(&speed_check_mode),
+            no_speed_check: false,
+            ignore_ip: cfg.ignore_ip(),
+            whitelist_ip: cfg.whitelist_ip(),
+            blacklist_ip: cfg.blacklist_ip(),
+            ip_alias: cfg.ip_alias(),
+            lookup_options,
+        };
+        let query_tasks = server
+            .iter()
+            .map(|ns| per_nameserver_lookup_ip(ns, name.clone(), &options).boxed())
+            .collect();
+        select_ip_response_reporting_first(
+            name,
+            ResponseMode::FastestIp,
+            &speed_check_mode,
+            query_tasks,
+            Some(first_tx),
+        )
+        .await
+    }
+    .boxed();
+
+    // The lookup pauses after reporting its first answer, so no probe starts
+    // unless the rest is polled again.
+    match select(&mut first_rx, &mut lookup).await {
+        Either::Left((Ok(first), _)) => (first, Some(lookup)),
+        // Not reached: the lookup reports its first answer before finishing.
+        Either::Left((Err(_), _)) => (Err(ProtoErrorKind::NoConnections.into()), None),
+        Either::Right((result, _)) => (result, None),
+    }
 }
 
 struct LookupIpOptions<'a> {
@@ -257,14 +362,7 @@ fn limit_remaining_queries<'a>(
     received_response: &mut bool,
     response: &Result<DnsResponse, LookupError>,
 ) {
-    let valid_response = match response {
-        Ok(response) => matches!(
-            response.response_code(),
-            ResponseCode::NoError | ResponseCode::NXDomain
-        ),
-        Err(error) => error.is_negative_response(),
-    };
-    if *received_response || !valid_response {
+    if *received_response || !is_valid_response(response) {
         return;
     }
     *received_response = true;
@@ -282,15 +380,42 @@ fn limit_remaining_queries<'a>(
         .collect();
 }
 
+/// An answer or a NODATA/NXDOMAIN reply, rather than an upstream failure.
+fn is_valid_response(response: &Result<DnsResponse, LookupError>) -> bool {
+    match response {
+        Ok(response) => matches!(
+            response.response_code(),
+            ResponseCode::NoError | ResponseCode::NXDomain
+        ),
+        Err(error) => error.is_negative_response(),
+    }
+}
+
 async fn select_ip_response(
     name: Name,
     response_strategy: ResponseMode,
     speed_check_mode: &[SpeedCheckMode],
+    query_tasks: Vec<BoxFuture<'_, Result<DnsResponse, LookupError>>>,
+) -> Result<DnsResponse, LookupError> {
+    select_ip_response_reporting_first(name, response_strategy, speed_check_mode, query_tasks, None)
+        .await
+}
+
+/// With `FastestIp`, `first_response` receives the answer `fastest-response`
+/// would return, the first valid answer or the last one when none is valid,
+/// while the selection goes on and waits for every upstream.
+async fn select_ip_response_reporting_first(
+    name: Name,
+    response_strategy: ResponseMode,
+    speed_check_mode: &[SpeedCheckMode],
     mut query_tasks: Vec<BoxFuture<'_, Result<DnsResponse, LookupError>>>,
+    mut first_response: Option<oneshot::Sender<Result<DnsResponse, LookupError>>>,
 ) -> Result<DnsResponse, LookupError> {
     use ResponseMode::*;
-    use futures_util::future::{Either, select, select_all};
+    use futures_util::future::select_all;
 
+    let reports_first = first_response.is_some();
+    debug_assert!(!reports_first || response_strategy == FastestIp);
     let mut received_response = false;
     let mut ok_tasks = vec![];
     let mut err_tasks = vec![];
@@ -437,7 +562,21 @@ async fn select_ip_response(
                 }
 
                 if let Some(res) = query_res {
-                    limit_remaining_queries(&mut query_tasks, &mut received_response, &res);
+                    if reports_first {
+                        // The caller gets the first valid answer at once, so
+                        // a slower upstream only delays the speed check.
+                        received_response |= is_valid_response(&res);
+                    } else {
+                        limit_remaining_queries(&mut query_tasks, &mut received_response, &res);
+                    }
+                    if let Some(first) =
+                        first_response.take_if(|_| received_response || query_tasks.is_empty())
+                    {
+                        let _ = first.send(res.clone());
+                        // Let the caller take the answer before any probe
+                        // starts: it may drop the rest of the selection.
+                        tokio::task::yield_now().await;
+                    }
                     match res {
                         Ok(lookup) => {
                             let ip_addrs = lookup.ip_addrs();
@@ -477,14 +616,7 @@ async fn select_ip_response(
         }
         FastestResponse => loop {
             let (res, _idx, rest) = select_all(query_tasks).await;
-            let valid_response = match &res {
-                Ok(response) => matches!(
-                    response.response_code(),
-                    ResponseCode::NoError | ResponseCode::NXDomain
-                ),
-                Err(error) => error.is_negative_response(),
-            };
-            if valid_response || rest.is_empty() {
+            if is_valid_response(&res) || rest.is_empty() {
                 return res;
             }
             query_tasks = rest;
@@ -993,6 +1125,372 @@ mod tests {
         assert_eq!(
             response.ip_addrs(),
             vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_speed_check_is_deferred_only_for_cached_fastest_response() {
+        use crate::config::ServerOpts;
+
+        let name: Name = "speed.example.".parse().unwrap();
+        let req: DnsRequest = Query::query(name.clone(), RecordType::A).into();
+        let deferred = |directives: &[&str], server_opts: ServerOpts, is_dualstack: bool| {
+            let cfg = directives
+                .iter()
+                .fold(RuntimeConfig::builder(), |builder, directive| {
+                    builder.with(directive)
+                })
+                .build()
+                .unwrap();
+            let mut ctx = DnsContext::new(&name, Arc::new(cfg), server_opts);
+            ctx.is_dualstack = is_dualstack;
+            deferred_speed_check_mode(&ctx, &req).cloned()
+        };
+        let fastest_response = [
+            "response-mode fastest-response",
+            "speed-check-mode ping,tcp:443",
+        ];
+
+        assert_eq!(
+            deferred(&fastest_response, Default::default(), false)
+                .unwrap()
+                .as_slice(),
+            &[SpeedCheckMode::Ping, SpeedCheckMode::Tcp(443)]
+        );
+        for directives in [
+            &["response-mode fastest-ip", "speed-check-mode ping"][..],
+            &["response-mode first-ping", "speed-check-mode ping"],
+            &["response-mode fastest-response", "speed-check-mode none"],
+            &[
+                "response-mode fastest-response",
+                "speed-check-mode ping",
+                "cache-size 0",
+            ],
+            &[
+                "response-mode fastest-response",
+                "speed-check-mode ping",
+                "domain-rules /speed.example/ -no-cache",
+            ],
+        ] {
+            assert!(
+                deferred(directives, Default::default(), false).is_none(),
+                "{directives:?}"
+            );
+        }
+        for server_opts in [
+            ServerOpts {
+                is_background: true,
+                ..Default::default()
+            },
+            ServerOpts {
+                no_speed_check: Some(true),
+                ..Default::default()
+            },
+            ServerOpts {
+                no_cache: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert!(deferred(&fastest_response, server_opts, false).is_none());
+        }
+        assert!(
+            deferred(&fastest_response, Default::default(), true).is_none(),
+            "dual-stack selection does not cache the other family"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fastest_ip_reports_the_first_answer_while_probing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let modes = [SpeedCheckMode::Tcp(listener.local_addr().unwrap().port())];
+        let first = speed_test_response(&["127.0.0.2"], RecordType::A);
+        let name = first.query().name().clone();
+        let (release, released) = oneshot::channel::<()>();
+        let tasks = vec![
+            async { Ok(first) }.boxed(),
+            async {
+                let _ = released.await;
+                Ok(speed_test_response(&["127.0.0.1"], RecordType::A))
+            }
+            .boxed(),
+        ];
+        let (first_tx, first_rx) = oneshot::channel();
+        let (reported, fastest) = tokio::join!(
+            async {
+                let reported = tokio::time::timeout(Duration::from_secs(1), first_rx)
+                    .await
+                    .expect("the first answer must not wait for the other upstreams")
+                    .unwrap();
+                // Later than the window a waiting client allows other upstreams.
+                sleep(Duration::from_millis(300)).await;
+                release.send(()).unwrap();
+                reported
+            },
+            select_ip_response_reporting_first(
+                name,
+                ResponseMode::FastestIp,
+                &modes,
+                tasks,
+                Some(first_tx)
+            )
+        );
+        assert_eq!(
+            reported.unwrap().ip_addrs(),
+            vec!["127.0.0.2".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            fastest.unwrap().ip_addrs(),
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()],
+            "the selection must wait for the slower upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dropping_the_rest_after_the_first_answer_sends_no_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let modes = [SpeedCheckMode::Tcp(listener.local_addr().unwrap().port())];
+        let answer = speed_test_response(&["127.0.0.1"], RecordType::A);
+        let name = answer.query().name().clone();
+        let (first_tx, mut first_rx) = oneshot::channel();
+        let mut selection = select_ip_response_reporting_first(
+            name,
+            ResponseMode::FastestIp,
+            &modes,
+            vec![async { Ok(answer) }.boxed()],
+            Some(first_tx),
+        )
+        .boxed();
+
+        let reported = match select(&mut first_rx, &mut selection).await {
+            Either::Left((reported, _)) => reported.unwrap().unwrap(),
+            Either::Right(_) => panic!("the selection must pause after the first answer"),
+        };
+        assert_eq!(
+            reported.ip_addrs(),
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        drop(selection);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "a dropped selection must not have probed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fastest_ip_reports_the_last_answer_when_none_is_valid() {
+        let query = Query::query("failed.example.".parse().unwrap(), RecordType::A);
+        let error = |code| {
+            let authority = AuthorityData::new(Box::new(query.clone()), None, true, false, None);
+            let mut no_records: crate::libdns::proto::NoRecords = authority.into();
+            no_records.response_code = code;
+            LookupError::from(ProtoErrorKind::NoRecordsFound(no_records))
+        };
+        let (servfail, refused) = (error(ResponseCode::ServFail), error(ResponseCode::Refused));
+        let tasks = vec![
+            async { Err(servfail) }.boxed(),
+            async {
+                sleep(Duration::from_millis(20)).await;
+                Err(refused)
+            }
+            .boxed(),
+        ];
+        let (first_tx, first_rx) = oneshot::channel();
+        let result = select_ip_response_reporting_first(
+            query.name().clone(),
+            ResponseMode::FastestIp,
+            &[SpeedCheckMode::Ping],
+            tasks,
+            Some(first_tx),
+        )
+        .await;
+        assert!(result.is_err());
+        let reported = first_rx.await.unwrap().unwrap_err();
+        assert_eq!(
+            reported
+                .as_no_records_response(&query)
+                .unwrap()
+                .response_code(),
+            ResponseCode::Refused
+        );
+    }
+
+    /// Cache and name server middlewares over two UDP upstreams: the first
+    /// answers at once with an address that fails the probe, the second 30 ms
+    /// later with one that passes it.
+    struct UpstreamHarness {
+        handler: crate::dns_mw::DnsMiddlewareHandler,
+        deferred_speed_checks: Arc<Semaphore>,
+        queries: Vec<Arc<std::sync::atomic::AtomicUsize>>,
+        background: tokio::sync::mpsc::UnboundedReceiver<crate::server::IncomingDnsMessage>,
+        probe_target: tokio::net::TcpListener,
+    }
+
+    async fn upstream_harness() -> UpstreamHarness {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+        use crate::dns_mw_cache::DnsCacheMiddleware;
+        use crate::libdns::proto::op::Message;
+        use crate::server::DnsHandle;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probe_target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut directives = vec![
+            "response-mode fastest-response".to_string(),
+            format!(
+                "speed-check-mode tcp:{}",
+                probe_target.local_addr().unwrap().port()
+            ),
+            "prefetch-domain no".to_string(),
+            "cache-persist no".to_string(),
+        ];
+        let mut queries = vec![];
+        for (ip, delay_ms) in [("127.0.0.2", 0), ("127.0.0.1", 30)] {
+            let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            directives.push(format!("server {}", socket.local_addr().unwrap()));
+            let count = Arc::new(AtomicUsize::new(0));
+            queries.push(count.clone());
+            let ip: IpAddr = ip.parse().unwrap();
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                loop {
+                    // Windows reports a reply to an already closed client port
+                    // as an error on the next receive.
+                    let Ok((len, peer)) = socket.recv_from(&mut buffer).await else {
+                        continue;
+                    };
+                    let Ok(request) = Message::from_vec(&buffer[..len]) else {
+                        continue;
+                    };
+                    let mut response = request.to_response();
+                    response.set_recursion_available(true);
+                    if let Some(query) = request.queries().first()
+                        && query.query_type() == RecordType::A
+                    {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        response.add_answer(Record::from_rdata(
+                            query.name().clone(),
+                            600,
+                            RData::from(ip),
+                        ));
+                    }
+                    let socket = socket.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_millis(delay_ms)).await;
+                        let _ = socket.send_to(&response.to_vec().unwrap(), peer).await;
+                    });
+                }
+            });
+        }
+        let cfg = directives
+            .iter()
+            .fold(RuntimeConfig::builder(), |builder, directive| {
+                builder.with(directive)
+            })
+            .build()
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let (background, background_handle) = DnsHandle::mock();
+        let name_server = NameServerMiddleware::new(cfg.create_dns_client().await);
+        let deferred_speed_checks = name_server.deferred_speed_checks.clone();
+        let handler = DnsMiddlewareBuilder::new()
+            .with(DnsCacheMiddleware::new(&cfg, background_handle))
+            .with(name_server)
+            .build(cfg);
+        UpstreamHarness {
+            handler,
+            deferred_speed_checks,
+            queries,
+            background,
+            probe_target,
+        }
+    }
+
+    async fn wait_for_cached_ip(
+        handler: &crate::dns_mw::DnsMiddlewareHandler,
+        name: &Name,
+        ip: &str,
+    ) -> bool {
+        let ip: IpAddr = ip.parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handler
+                .lookup(name.clone(), RecordType::A)
+                .await
+                .unwrap()
+                .ip_addrs()
+                != [ip]
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn test_fastest_response_speed_check_reuses_the_upstream_queries() {
+        use std::sync::atomic::Ordering;
+
+        let UpstreamHarness {
+            handler,
+            queries,
+            mut background,
+            probe_target: _probe_target,
+            ..
+        } = upstream_harness().await;
+        let name: Name = "speed.example.".parse().unwrap();
+
+        let response = handler.lookup(name.clone(), RecordType::A).await.unwrap();
+        assert_eq!(
+            response.ip_addrs(),
+            vec!["127.0.0.2".parse::<IpAddr>().unwrap()],
+            "the client must get the first upstream answer"
+        );
+        assert!(
+            wait_for_cached_ip(&handler, &name, "127.0.0.1").await,
+            "the cache must keep the probed fastest address"
+        );
+        for count in &queries {
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "each upstream must be queried once"
+            );
+        }
+        assert!(background.try_recv().is_err(), "no second lookup may run");
+    }
+
+    #[tokio::test]
+    async fn test_speed_checks_beyond_the_limit_keep_the_first_answer() {
+        let UpstreamHarness {
+            handler,
+            deferred_speed_checks,
+            probe_target,
+            ..
+        } = upstream_harness().await;
+        let all = deferred_speed_checks
+            .try_acquire_many_owned(MAX_DEFERRED_SPEED_CHECKS as u32)
+            .unwrap();
+
+        let name: Name = "full.speed.example.".parse().unwrap();
+        let first: IpAddr = "127.0.0.2".parse().unwrap();
+        let response = handler.lookup(name.clone(), RecordType::A).await.unwrap();
+        assert_eq!(response.ip_addrs(), [first]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), probe_target.accept())
+                .await
+                .is_err(),
+            "a lookup beyond the limit must not probe"
+        );
+        let response = handler.lookup(name, RecordType::A).await.unwrap();
+        assert_eq!(response.ip_addrs(), [first]);
+
+        drop(all);
+        let name: Name = "free.speed.example.".parse().unwrap();
+        handler.lookup(name.clone(), RecordType::A).await.unwrap();
+        assert!(
+            wait_for_cached_ip(&handler, &name, "127.0.0.1").await,
+            "a released slot must allow the next speed check"
         );
     }
 

@@ -3,6 +3,7 @@ use std::ops::Deref;
 use crate::libdns::proto::op::ResponseCode;
 
 use crate::dns::*;
+use crate::dns_conf::RuntimeConfig;
 
 use crate::middleware::*;
 
@@ -18,21 +19,23 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsBogusMiddl
     ) -> Result<DnsResponse, DnsError> {
         let res = next.run(ctx, req).await;
 
-        let bogus_nxdomain = ctx.cfg().bogus_nxdomain();
-
         if req.query().query_type().is_ip_addr()
             && let Ok(lookup) = res.as_ref()
+            && has_bogus_address(ctx.cfg(), lookup)
         {
-            for record in lookup.records() {
-                if match record.data() {
-                    RData::A(ip) if bogus_nxdomain.contains(ip.deref()) => true,
-                    RData::AAAA(ip) if bogus_nxdomain.contains(ip.deref()) => true,
-                    _ => false,
-                } {
-                    return Err(ResponseCode::NXDomain.into());
-                }
-            }
+            return Err(ResponseCode::NXDomain.into());
         }
         res
     }
+}
+
+/// Whether an answer contains a `bogus-nxdomain` address.
+pub(crate) fn has_bogus_address(cfg: &RuntimeConfig, lookup: &DnsResponse) -> bool {
+    let bogus_nxdomain = cfg.bogus_nxdomain();
+
+    lookup.records().iter().any(|record| match record.data() {
+        RData::A(ip) => bogus_nxdomain.contains(ip.deref()),
+        RData::AAAA(ip) => bogus_nxdomain.contains(ip.deref()),
+        _ => false,
+    })
 }

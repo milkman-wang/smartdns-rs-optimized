@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Local;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -29,20 +30,13 @@ use crate::{
 use lru::LruCache;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
-use tokio::sync::Semaphore;
 use tokio::time::sleep;
-
-/// Speed-check refreshes waiting or running at once. Background lookups share
-/// 16 slots and queue for them, so without this bound a flood of unique names
-/// would grow the queue and double upstream load without limit.
-const MAX_SPEED_CHECK_REFRESHES: usize = 128;
 
 pub struct DnsCacheMiddleware {
     cfg: Arc<RuntimeConfig>,
     cache: Arc<DnsCache>,
     prefetch_notify: Arc<DomainPrefetchingNotify>,
     client: DnsHandle,
-    refresh_slots: Arc<Semaphore>,
 }
 
 impl DnsCacheMiddleware {
@@ -133,7 +127,6 @@ impl DnsCacheMiddleware {
                 is_background: true,
                 ..Default::default()
             }),
-            refresh_slots: Arc::new(Semaphore::new(MAX_SPEED_CHECK_REFRESHES)),
         };
 
         if cfg.prefetch_domain() {
@@ -196,26 +189,43 @@ impl DnsCacheMiddleware {
         });
     }
 
-    /// Repeats a `fastest-response` lookup in the background. Background
-    /// lookups run as `fastest-ip`, and their answer replaces the cache entry
-    /// the client was served from. When all refresh slots are taken the entry
-    /// stays unprobed until prefetch or expiry refreshes it.
-    fn refresh_with_speed_check(&self, ctx: &DnsContext, query: &Query) {
-        let Ok(slot) = self.refresh_slots.clone().try_acquire_owned() else {
-            return;
-        };
+    /// Lets a `fastest-response` lookup finish its speed check in the
+    /// background, then replaces the entry the client was served from with
+    /// the answer for the fastest address. The name server middleware limits
+    /// how many run at once.
+    fn finish_speed_check(
+        &self,
+        ctx: &DnsContext,
+        query: &Query,
+        lookup: BoxFuture<'static, Result<DnsResponse, DnsError>>,
+    ) {
         if !self.cache.begin_refresh(query) {
             return;
         }
-        let mut opts = ctx.server_opts.clone();
-        opts.is_background = true;
-        let client = self.client.with_new_opt(opts);
+        let cfg = ctx.cfg().clone();
         let cache = self.cache.clone();
+        let prefetch_notify = self.prefetch_notify.clone();
+        let server_group_name = ctx.server_group_name().to_owned();
         let query = query.clone();
         tokio::spawn(async move {
-            client.send(query.clone()).await;
+            // The bogus-nxdomain check between this middleware and the
+            // upstreams only saw the first answer.
+            if let Ok(lookup) = lookup.await
+                && lookup
+                    .records()
+                    .iter()
+                    .any(|record| record.record_type() == query.query_type())
+                && !crate::dns_mw_bogus::has_bogus_address(&cfg, &lookup)
+            {
+                let ttl = lookup.min_ttl().unwrap_or(0);
+                cache.insert_response(lookup, Instant::now(), ttl, &server_group_name);
+                if cfg.prefetch_domain() {
+                    prefetch_notify
+                        .notify_after(Duration::from_secs(ttl as u64))
+                        .await;
+                }
+            }
             cache.end_refresh(&query);
-            drop(slot);
         });
     }
 }
@@ -289,6 +299,8 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
         }
 
         let res = next.run(ctx, req).await;
+        // Dropped, and so cancelled, unless the answer below is cached.
+        let speed_check = ctx.pending_speed_check.take();
         let res = match res {
             Err(error) if error.is_negative_response() => {
                 match error.as_no_records_response(query) {
@@ -331,16 +343,11 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         server_group_name,
                     );
 
-                    // The client was answered without probing; probe in the
-                    // background so the cached entry becomes the fastest address.
+                    // The client got the first upstream answer without probing.
                     // A single address still qualifies: other upstreams may
                     // return different, closer addresses.
-                    if !ctx.server_opts.is_background
-                        && query.query_type().is_ip_addr()
-                        && matches!(ctx.source, LookupFrom::Server(_))
-                        && crate::dns_mw_ns::refines_cache_by_speed_check(ctx)
-                    {
-                        self.refresh_with_speed_check(ctx, query);
+                    if let Some(speed_check) = speed_check {
+                        self.finish_speed_check(ctx, query, speed_check);
                     }
 
                     if ctx.cfg().prefetch_domain()
@@ -1839,181 +1846,211 @@ mod tests {
             .unwrap();
     }
 
-    /// Upstream stand-in that answers every query with the given addresses.
-    struct IpUpstream(&'static [&'static str]);
+    type SpeedCheckSender = tokio::sync::oneshot::Sender<Result<DnsResponse, DnsError>>;
+
+    /// Upstream stand-in that answers with the given addresses and leaves a
+    /// speed check whose result the test sends.
+    struct SpeedCheckUpstream {
+        first: &'static [&'static str],
+        checks: tokio::sync::mpsc::UnboundedSender<SpeedCheckSender>,
+    }
 
     #[async_trait::async_trait]
-    impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for IpUpstream {
+    impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for SpeedCheckUpstream {
         async fn handle(
             &self,
             ctx: &mut DnsContext,
             req: &DnsRequest,
             _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
         ) -> Result<DnsResponse, DnsError> {
+            use futures::FutureExt;
+
             ctx.source = LookupFrom::Server("default".to_string());
-            let query = req.query().original().clone();
-            let records: Vec<Record> = self
-                .0
-                .iter()
-                .map(|ip| {
-                    Record::from_rdata(query.name().clone(), 600, RData::A(ip.parse().unwrap()))
-                })
-                .collect();
-            Ok(DnsResponse::new_with_max_ttl(query, records))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_fastest_response_miss_schedules_one_speed_checked_refresh() {
-        use crate::dns_mw::DnsMiddlewareBuilder;
-
-        // A single address is refreshed too: other upstreams may know closer ones.
-        for upstream_ips in [&["192.0.2.1"][..], &["192.0.2.1", "192.0.2.2"][..]] {
-            let cfg = Arc::new(
-                RuntimeConfig::builder()
-                    .with("response-mode fastest-response")
-                    .with("speed-check-mode ping,tcp:443")
-                    .with("prefetch-domain no")
-                    .with("cache-persist no")
-                    .build()
-                    .unwrap(),
-            );
-            let (mut background_rx, background_handle) = DnsHandle::mock();
-            let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
-            let cache = cache_middleware.cache().clone();
-            let handler = DnsMiddlewareBuilder::new()
-                .with(cache_middleware)
-                .with(IpUpstream(upstream_ips))
-                .build(cfg);
-
-            let name: Name = "speed.example.".parse().unwrap();
-            let query = Query::query(name.clone(), RecordType::A);
-            let response = handler.lookup(name, RecordType::A).await.unwrap();
-            assert_eq!(
-                response.ip_addrs(),
-                upstream_ips
-                    .iter()
-                    .map(|ip| ip.parse::<IpAddr>().unwrap())
-                    .collect::<Vec<_>>(),
-                "the client must get the unprobed upstream answer"
-            );
-
-            let (message, opts, sender) =
-                tokio::time::timeout(Duration::from_secs(1), background_rx.recv())
-                    .await
-                    .expect("a fastest-response miss must schedule a speed-checked refresh")
-                    .unwrap();
-            assert!(opts.is_background, "background lookups run as fastest-ip");
-            assert_eq!(
-                DnsRequest::try_from(message).unwrap().query().original(),
-                &query
-            );
-            assert!(
-                !cache.begin_refresh(&query),
-                "only one refresh may run for an entry"
-            );
-
-            // A failed refresh must release the entry for later refreshes.
-            drop(sender);
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while !cache.begin_refresh(&query) {
-                    tokio::task::yield_now().await;
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            self.checks.send(sender).unwrap();
+            ctx.pending_speed_check.set(
+                async move {
+                    receiver
+                        .await
+                        .unwrap_or_else(|_| Err(ProtoErrorKind::Timeout.into()))
                 }
+                .boxed(),
+            );
+            Ok(ip_response(req.query().original(), self.first))
+        }
+    }
+
+    fn ip_response(query: &Query, ips: &[&str]) -> DnsResponse {
+        let records: Vec<Record> = ips
+            .iter()
+            .map(|ip| Record::from_rdata(query.name().clone(), 600, RData::A(ip.parse().unwrap())))
+            .collect();
+        DnsResponse::new_with_max_ttl(query.clone(), records)
+    }
+
+    fn cached_ips(cache: &DnsCache, query: &Query) -> Vec<IpAddr> {
+        cache.get(query, Instant::now()).unwrap().0.ip_addrs()
+    }
+
+    struct SpeedCheckHarness {
+        handler: crate::dns_mw::DnsMiddlewareHandler,
+        cache: Arc<DnsCache>,
+        background: tokio::sync::mpsc::UnboundedReceiver<crate::server::IncomingDnsMessage>,
+        checks: tokio::sync::mpsc::UnboundedReceiver<SpeedCheckSender>,
+    }
+
+    fn speed_check_harness(
+        directives: &[&str],
+        first: &'static [&'static str],
+    ) -> SpeedCheckHarness {
+        let cfg = directives
+            .iter()
+            .fold(RuntimeConfig::builder(), |builder, directive| {
+                builder.with(directive)
             })
-            .await
-            .expect("a finished refresh must release the entry");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_speed_check_refreshes_are_bounded() {
-        use crate::dns_mw::DnsMiddlewareBuilder;
-
-        let cfg = Arc::new(
-            RuntimeConfig::builder()
-                .with("response-mode fastest-response")
-                .with("speed-check-mode ping,tcp:443")
-                .with("prefetch-domain no")
-                .with("cache-persist no")
-                .build()
-                .unwrap(),
-        );
-        let (mut background_rx, background_handle) = DnsHandle::mock();
+            .with("prefetch-domain no")
+            .with("cache-persist no")
+            .build()
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let (background, background_handle) = DnsHandle::mock();
         let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
-        let all_slots = cache_middleware
-            .refresh_slots
-            .clone()
-            .try_acquire_many_owned(MAX_SPEED_CHECK_REFRESHES as u32)
-            .unwrap();
-        let handler = DnsMiddlewareBuilder::new()
+        let cache = cache_middleware.cache().clone();
+        let (checks_tx, checks) = tokio::sync::mpsc::unbounded_channel();
+        let handler = crate::dns_mw::DnsMiddlewareBuilder::new()
             .with(cache_middleware)
-            .with(IpUpstream(&["192.0.2.1", "192.0.2.2"]))
+            .with(SpeedCheckUpstream {
+                first,
+                checks: checks_tx,
+            })
             .build(cfg);
-
-        handler
-            .lookup("full.example.", RecordType::A)
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            background_rx.try_recv().is_err(),
-            "no refresh may start while every slot is taken"
-        );
-
-        drop(all_slots);
-        handler
-            .lookup("free.example.", RecordType::A)
-            .await
-            .unwrap();
-        let (message, opts, _) = tokio::time::timeout(Duration::from_secs(1), background_rx.recv())
-            .await
-            .expect("a released slot must allow the next refresh")
-            .unwrap();
-        assert!(opts.is_background);
-        assert_eq!(
-            DnsRequest::try_from(message)
-                .unwrap()
-                .query()
-                .original()
-                .name(),
-            &"free.example.".parse::<Name>().unwrap()
-        );
+        SpeedCheckHarness {
+            handler,
+            cache,
+            background,
+            checks,
+        }
     }
 
     #[tokio::test]
-    async fn test_other_modes_and_disabled_speed_check_do_not_refresh() {
-        use crate::dns_mw::DnsMiddlewareBuilder;
+    async fn test_speed_check_replaces_the_first_answer_without_another_query() {
+        let SpeedCheckHarness {
+            handler,
+            cache,
+            background,
+            mut checks,
+            ..
+        } = speed_check_harness(&[], &["192.0.2.1", "192.0.2.2"]);
 
-        for directives in [
-            ["response-mode fastest-ip", "speed-check-mode ping"],
-            ["response-mode first-ping", "speed-check-mode ping"],
-            ["response-mode fastest-response", "speed-check-mode none"],
-        ] {
-            let cfg = Arc::new(
-                RuntimeConfig::builder()
-                    .with(directives[0])
-                    .with(directives[1])
-                    .with("prefetch-domain no")
-                    .with("cache-persist no")
-                    .build()
-                    .unwrap(),
-            );
-            let (background_rx, background_handle) = DnsHandle::mock();
-            let handler = DnsMiddlewareBuilder::new()
-                .with(DnsCacheMiddleware::new(&cfg, background_handle))
-                .with(IpUpstream(&["192.0.2.1", "192.0.2.2"]))
-                .build(cfg);
+        let name: Name = "speed.example.".parse().unwrap();
+        let query = Query::query(name.clone(), RecordType::A);
+        let response = handler.lookup(name, RecordType::A).await.unwrap();
+        let first: Vec<IpAddr> = vec!["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+        assert_eq!(
+            response.ip_addrs(),
+            first,
+            "the client must get the first upstream answer"
+        );
+        assert_eq!(cached_ips(&cache, &query), first);
+        assert!(
+            !cache.begin_refresh(&query),
+            "only one speed check may run for an entry"
+        );
 
-            handler
-                .lookup("speed.example.", RecordType::A)
-                .await
-                .unwrap();
-            assert_eq!(
-                count_background_queries(background_rx).await,
-                0,
-                "{directives:?}"
-            );
-        }
+        let check = checks.recv().await.unwrap();
+        check.send(Ok(ip_response(&query, &["192.0.2.2"]))).unwrap();
+        let fastest: IpAddr = "192.0.2.2".parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while cached_ips(&cache, &query) != [fastest] {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the cache must keep the fastest address");
+        assert!(
+            cache.begin_refresh(&query),
+            "a finished check releases the entry"
+        );
+        assert_eq!(
+            count_background_queries(background).await,
+            0,
+            "the speed check must not query the upstreams again"
+        );
+
+        // A failed check keeps the first answer and releases the entry.
+        let query = Query::query("failed.example.".parse().unwrap(), RecordType::A);
+        handler
+            .lookup(query.name().clone(), RecordType::A)
+            .await
+            .unwrap();
+        drop(checks.recv().await.unwrap());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cache.begin_refresh(&query) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a failed check must release the entry");
+        assert_eq!(cached_ips(&cache, &query), first);
+    }
+
+    #[tokio::test]
+    async fn test_uncached_answers_cancel_the_speed_check() {
+        // A reply without addresses or SOA is not cached.
+        let SpeedCheckHarness {
+            handler,
+            mut checks,
+            ..
+        } = speed_check_harness(&[], &[]);
+        handler
+            .lookup("nodata.example.", RecordType::A)
+            .await
+            .unwrap();
+        assert!(checks.recv().await.unwrap().is_closed());
+
+        let SpeedCheckHarness {
+            handler,
+            mut checks,
+            ..
+        } = speed_check_harness(
+            &["domain-rules /no-cache.example/ -no-cache"],
+            &["192.0.2.1"],
+        );
+        handler
+            .lookup("no-cache.example.", RecordType::A)
+            .await
+            .unwrap();
+        assert!(checks.recv().await.unwrap().is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_speed_check_answer_with_bogus_address_is_not_cached() {
+        let SpeedCheckHarness {
+            handler,
+            cache,
+            mut checks,
+            ..
+        } = speed_check_harness(&["bogus-nxdomain 192.0.2.66"], &["192.0.2.1"]);
+        let query = Query::query("bogus.example.".parse().unwrap(), RecordType::A);
+        handler
+            .lookup(query.name().clone(), RecordType::A)
+            .await
+            .unwrap();
+        let check = checks.recv().await.unwrap();
+        check
+            .send(Ok(ip_response(&query, &["192.0.2.66"])))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cache.begin_refresh(&query) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the check must finish");
+        assert_eq!(
+            cached_ips(&cache, &query),
+            vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[test]
