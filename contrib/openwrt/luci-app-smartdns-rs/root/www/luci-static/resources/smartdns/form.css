@@ -2,6 +2,7 @@
 	--smartdns-control-height: 2.75rem;
 	--smartdns-field-width: 16rem;
 	--smartdns-wide-field-width: 36rem;
+	--smartdns-editor-width: 48rem;
 }
 #cbi-smartdns .cbi-section,
 #cbi-smartdns .cbi-section-node,
@@ -50,6 +51,23 @@
 	line-height: 1.5 !important;
 	white-space: pre-wrap;
 	resize: vertical;
+}
+/* A wide widget does not fit beside the label column on narrower screens,
+ * and the theme then drops its field below the label. Give such a field the
+ * width left beside the label instead; percentages work outside table cells. */
+@supports selector(:has(*)) {
+	#cbi-smartdns div.cbi-value:has(> .cbi-value-field :is(textarea, input[type="file"], .cbi-dynlist)) > .cbi-value-field {
+		display: flow-root;
+		width: auto;
+	}
+	#cbi-smartdns div.cbi-value :where(.cbi-value-field, .cbi-value-field > div[id^="cbid."]) > :where(input[type="file"], .cbi-dynlist) {
+		width: 100%;
+		max-width: var(--smartdns-wide-field-width);
+	}
+	#cbi-smartdns div.cbi-value :where(.cbi-value-field, .cbi-value-field > div[id^="cbid."]) > textarea {
+		width: 100% !important;
+		max-width: var(--smartdns-editor-width);
+	}
 }
 #cbi-smartdns div.cbi-value > .cbi-value-field :where(input, textarea)::placeholder {
 	font: inherit;
@@ -102,6 +120,11 @@
 	overflow-x: auto;
 }
 #cbi-smartdns .cbi-section-table td {
+	overflow-wrap: break-word;
+}
+/* Addresses, URLs and paths have no break points of their own. Letting only
+ * these columns break anywhere keeps names and groups whole. */
+#cbi-smartdns .cbi-section-table td:is([data-name="ip"], [data-name="url"], [data-name="client_addr"], [data-name="ip_addr"], [data-name="domain_list_file"], [data-name="ip_set_file"]) {
 	overflow-wrap: anywhere;
 }
 #cbi-smartdns .cbi-section-table :where(select, .cbi-dropdown) {
@@ -109,6 +132,118 @@
 	width: var(--smartdns-field-width);
 	min-width: 0;
 	max-width: 100%;
+}
+/* Below 1152px Argon shows every table row as a card with each cell at half
+ * width, which spreads these short summary rows over a whole screen. Keep
+ * them as tables down to phone widths and as compact cards below that. The
+ * download list has input fields, which suit the theme's cards. */
+@media screen and (min-width: 601px) {
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .cbi-section-table {
+		display: table;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .cbi-section-table .tr {
+		display: table-row;
+		box-shadow: none;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .cbi-section-table :where(.th, .td) {
+		display: table-cell;
+		vertical-align: middle;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .cbi-section-table .td[data-title]::before {
+		display: none;
+	}
+}
+@media screen and (min-width: 601px) and (max-width: 1152px) {
+	/* The desktop cell padding and button spacing leave too little room for
+	 * the columns at these widths. */
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .cbi-section-table :where(.th, .td) {
+		padding: .75rem .5rem;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .td.cbi-section-actions > * {
+		gap: .25rem;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .td.cbi-section-actions > * > * {
+		margin: 0;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .td.cbi-section-actions .cbi-button {
+		padding-right: .5rem;
+		padding-left: .5rem;
+	}
+}
+@media screen and (max-width: 1152px) {
+	/* In the download cards the URL gets a line of its own. */
+	#cbi-smartdns-download-file .cbi-section-table td[data-name="url"] {
+		flex-basis: 100%;
+	}
+	#cbi-smartdns-download-file .cbi-section-table :where(select, .cbi-dropdown) {
+		width: 100%;
+	}
+}
+@media screen and (min-width: 1153px) {
+	/* As a table, the download list gives the URL the room that the short
+	 * type list does not need. */
+	#cbi-smartdns-download-file .cbi-section-table :where(.th, .td) {
+		padding: .75rem .5rem;
+	}
+	#cbi-smartdns-download-file .cbi-section-table :where(select, .cbi-dropdown) {
+		width: auto;
+	}
+	#cbi-smartdns-download-file .cbi-section-table td[data-name="url"] {
+		width: 40%;
+	}
+	#cbi-smartdns-download-file .cbi-section-table td[data-name="url"] input {
+		min-width: 12rem;
+	}
+}
+#cbi-smartdns .cbi-tblsection {
+	container-type: inline-size;
+}
+@media screen and (min-width: 601px) {
+	/* Beside the menu a table can get less than 600px. Put the row buttons in
+	 * two columns there so the values keep their room. */
+	@container (max-width: 600px) {
+		#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .td.cbi-section-actions > * {
+			display: inline-grid;
+			grid-template-columns: repeat(2, auto);
+		}
+	}
+}
+@media screen and (max-width: 600px) {
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row:not(.placeholder) {
+		align-items: center;
+		justify-content: flex-start;
+		gap: .5rem 1.25rem;
+		padding: .75rem 1rem;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row:not(.placeholder) > .td {
+		flex: 0 1 auto;
+		align-self: center;
+		min-width: 0;
+		padding-top: 0;
+		padding-bottom: 0;
+		border-top: 0;
+		/* Argon centers row cells with !important. */
+		text-align: left !important;
+	}
+	/* Show each label on the same line as its value. */
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row > .td.cbi-value-field > div {
+		display: inline;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row > .td .cbi-checkbox {
+		display: inline-flex;
+		height: auto;
+		vertical-align: middle;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row > .td[data-title]::before {
+		display: inline;
+		padding: 0 .4rem 0 0;
+		font-weight: normal;
+		opacity: .65;
+	}
+	#cbi-smartdns .cbi-tblsection:not(#cbi-smartdns-download-file) .tr.cbi-section-table-row > .td.cbi-section-actions {
+		flex: 1 0 100%;
+		text-align: right !important;
+	}
 }
 #cbi-smartdns .smartdns-status-section {
 	display: flex;

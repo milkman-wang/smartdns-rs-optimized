@@ -99,11 +99,27 @@ function Map(name, title)
 	return map
 end
 SimpleForm = Map
-local model = assert(loadfile(root .. "model/cbi/smartdns/smartdns.lua"))()
+local pages = {}
+for _, name in ipairs({"smartdns", "upstream", "rules", "files"}) do
+	pages[name] = assert(loadfile(root .. "model/cbi/smartdns/" .. name .. ".lua"))()
+	assert(pages[name].template == "smartdns/map")
+end
+local model = pages.smartdns
+local function sections(page)
+	local names = {}
+	for _, section in ipairs(page.sections) do names[#names + 1] = section.name or section.kind end
+	return table.concat(names, ",")
+end
+assert(sections(pages.smartdns) == "SimpleSection,smartdns")
+assert(sections(pages.upstream) == "server")
+assert(sections(pages.rules) == "client-rule,domain-rule,domain-rule-list,ip-rule-list,ip-rule")
+assert(sections(pages.files) == "smartdns,download-file")
 local function option(section_name, option_name)
-	for _, section in ipairs(model.sections) do
-		if section.name == section_name and section.options[option_name] then
-			return section.options[option_name]
+	for _, page in pairs(pages) do
+		for _, section in ipairs(page.sections) do
+			if section.name == section_name and section.options[option_name] then
+				return section.options[option_name]
+			end
 		end
 	end
 	error("Missing option: " .. section_name .. "." .. option_name)
@@ -120,7 +136,7 @@ assert(general_count == 4, "General settings should stay as compact as C SmartDN
 assert(option("smartdns", "proxy_server").tab == "proxy")
 assert(option("smartdns", "dns64").tab == "dns64")
 assert(option("smartdns", "custom_conf").tab == "custom")
-model.uci.get = function() return {"192.0.2.1", "2001:db8::1"} end
+pages.rules.uci.get = function() return {"192.0.2.1", "2001:db8::1"} end
 assert(option("client-rule", "client_addr"):cfgvalue("client01") == "192.0.2.1, 2001:db8::1")
 assert(option("ip-rule-list", "ip_addr"):cfgvalue("ip01") == "192.0.2.1, 2001:db8::1")
 local upstream = option("server", "enabled").map
@@ -167,6 +183,10 @@ for _, case in ipairs({
 end
 package.loaded["luci.http"] = nil
 call_status = 0
+-- Rules and uploads also save files, the upstream table only UCI.
+assert(type(pages.rules.commit_handler) == "function")
+assert(type(pages.files.commit_handler) == "function")
+assert(pages.upstream.commit_handler == nil)
 
 local flush = option("smartdns", "_flush_cache")
 assert(flush.tab == "advanced")
@@ -187,14 +207,14 @@ for _, name in ipairs({"upload_conf_file", "upload_list_file", "upload_other_fil
 	assert(picker.template == "smartdns/upload", "Uploads must use CBI multipart staging on modern LuCI too")
 end
 local source = "/etc/luci-uploads/" .. upload:cbid("cfg01")
-model.formvalue = function() return "antiad.txt" end
+upload.map.formvalue = function() return "antiad.txt" end
 files[source] = "example.com\n"
 assert(upload:validate(source, "cfg01") == source)
 upload:write("cfg01", source)
 upload:write("cfg01", source) -- CBI reparses after apply.
 assert(files["/etc/smartdns/domain-set/antiad.txt"] == "example.com\n")
 assert(upload:validate("/etc/config/network", "cfg01") == nil)
-model.formvalue = function() return "../escape" end
+upload.map.formvalue = function() return "../escape" end
 assert(upload:validate(source, "cfg01") == nil)
 
 for _, case in ipairs({
@@ -217,7 +237,32 @@ assert(log.sections[1].options._log:cfgvalue() == "command output")
 assert(commands[#commands] == "/usr/libexec/smartdns-rs-call tail 2>&1")
 log.sections[1].options._clear:write()
 assert(commands[#commands] == "/usr/libexec/smartdns-rs-call clear_log 2>&1")
-assert(loadfile(root .. "controller/smartdns.lua"))
+
+-- The menu entry opens the settings tab; titled pages are the tabs.
+local nodes = {}
+nixio = {fs = {access = function() return true end}}
+function entry(path, target, title, order)
+	local node = {path = table.concat(path, "/"), target = target, title = title, order = order}
+	nodes[#nodes + 1] = node
+	return node
+end
+function alias(...) return {alias = table.concat({...}, "/")} end
+function cbi(name) return {cbi = name} end
+function call(name) return {call = name} end
+_ = translate
+assert(loadfile(root .. "controller/smartdns.lua"))()
+package.loaded["luci.controller.smartdns"].index()
+assert(nodes[1].path == "admin/services/smartdns")
+assert(nodes[1].target.alias == "admin/services/smartdns/settings")
+local tabs, order = {}, 0
+for _, node in ipairs(nodes) do
+	if node.title and node ~= nodes[1] then
+		tabs[#tabs + 1] = node.path:match("[^/]+$")
+		assert(node.order > order); order = node.order
+		assert(io.open(root .. "model/cbi/" .. node.target.cbi .. ".lua")):close()
+	end
+end
+assert(table.concat(tabs, ",") == "settings,upstream,rules,files,log")
 
 -- The row editor must load exactly one upstream and retain all advanced fields.
 local redirected
@@ -255,7 +300,7 @@ assert(detail.sections[1].options.ip.tab == "general")
 assert(detail.sections[1].options.set_mark.tab == "advanced")
 arg = {"settings"}
 assert(assert(loadfile(root .. "model/cbi/smartdns/server.lua"))() == nil)
-assert(redirected == "/admin/services/smartdns")
+assert(redirected == "/admin/services/smartdns/upstream")
 for _, case in ipairs({
 	{"client", "client-rule", "client_addr", "block_domain_set_file", "block", 3},
 	{"domain", "domain-rule-list", "domain_list_file", "addition_flag", "advanced", 5},
@@ -267,7 +312,7 @@ for _, case in ipairs({
 	assert(edit.sections[1].kind == NamedSection)
 	assert(edit.sections[1].options[case[3]].tab == "general")
 	assert(edit.sections[1].options[case[4]].tab == case[5])
-	for _, section in ipairs(model.sections) do
+	for _, section in ipairs(pages.rules.sections) do
 		if section.name == case[2] then
 			assert(section.template == "cbi/tblsection")
 			local count = 0
@@ -284,6 +329,7 @@ for _, case in ipairs({
 	end
 	arg = {"cfg01"} -- Never edit an upstream through a rule URL.
 	assert(assert(loadfile(root .. "model/cbi/smartdns/" .. case[1] .. ".lua"))() == nil)
+	assert(redirected == "/admin/services/smartdns/rules")
 end
 -- Modern LuCI's dispatcher loads catalogs; the legacy loadc API is absent.
 package.loaded["luci.i18n"].loadc = nil

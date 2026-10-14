@@ -4,7 +4,7 @@ local http = require "luci.http"
 local helpers = require "luci.model.smartdns_rs"
 local m = Map("smartdns", translate("Upstream DNS Servers"))
 m.template = "smartdns/map"
-m.redirect = dispatcher.build_url("admin", "services", "smartdns")
+m.redirect = dispatcher.build_url("admin", "services", "smartdns", "upstream")
 
 if not arg[1] or m.uci:get("smartdns", arg[1]) ~= "server" then
     http.redirect(m.redirect)

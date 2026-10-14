@@ -64,7 +64,7 @@ const page = new Function('view', 'rpc', 'form', 'uci', '_', 'E', 'L', 'fs', 'ui
     {addNotification: (title, node, type) => { notification = {node, type}; }});
 (async () => {
 const map = await page.render();
-assert.equal(map.stylesheet.attrs.href, '/luci-static/resources/smartdns/form.css?v=25.6');
+assert.equal(map.stylesheet.attrs.href, '/luci-static/resources/smartdns/form.css?v=25.7');
 const section = name => map.sections.find(s => s.name === name);
 const settings = section('smartdns');
 assert.deepEqual(Object.keys(settings.tabs),

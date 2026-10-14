@@ -4,11 +4,16 @@ module("luci.controller.smartdns", package.seeall)
 function index()
 	if not nixio.fs.access("/etc/config/smartdns") then return end
 	local page = entry({"admin", "services", "smartdns"},
-		cbi("smartdns/smartdns"), _("SmartDNS-rs"), 60)
+		alias("admin", "services", "smartdns", "settings"), _("SmartDNS-rs"), 60)
 	page.dependent = true
 	page.i18n = "smartdns-rs-compat"
 	page.acl_depends = {"luci-app-smartdns-rs"}
-	entry({"admin", "services", "smartdns", "log"}, cbi("smartdns/log")).leaf = true
+	-- Titled pages are shown as tabs.
+	entry({"admin", "services", "smartdns", "settings"}, cbi("smartdns/smartdns"), _("Settings"), 10).leaf = true
+	entry({"admin", "services", "smartdns", "upstream"}, cbi("smartdns/upstream"), _("Upstream DNS Servers"), 20).leaf = true
+	entry({"admin", "services", "smartdns", "rules"}, cbi("smartdns/rules"), _("Rules"), 30).leaf = true
+	entry({"admin", "services", "smartdns", "files"}, cbi("smartdns/files"), _("Download Files"), 40).leaf = true
+	entry({"admin", "services", "smartdns", "log"}, cbi("smartdns/log"), _("Log"), 50).leaf = true
 	entry({"admin", "services", "smartdns", "server"}, cbi("smartdns/server")).leaf = true
 	entry({"admin", "services", "smartdns", "client"}, cbi("smartdns/client")).leaf = true
 	entry({"admin", "services", "smartdns", "domain"}, cbi("smartdns/domain")).leaf = true

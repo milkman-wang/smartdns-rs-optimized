@@ -1748,3 +1748,9 @@ msgstr "DNS 缓存已清空。"
 
 msgid "Configuration changes applied."
 msgstr "配置更改已应用。"
+
+msgid "Rules"
+msgstr "规则"
+
+msgid "Log"
+msgstr "日志"

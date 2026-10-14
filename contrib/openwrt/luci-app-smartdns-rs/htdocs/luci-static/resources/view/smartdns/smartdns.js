@@ -886,7 +886,7 @@ return view.extend({
 
 
 		return m.render().then(function(node) {
-			node.prepend(E('link', { 'rel': 'stylesheet', 'href': L.resource('smartdns/form.css?v=25.6') }));
+			node.prepend(E('link', { 'rel': 'stylesheet', 'href': L.resource('smartdns/form.css?v=25.7') }));
 			return node;
 		});
 	}
