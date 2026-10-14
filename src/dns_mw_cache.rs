@@ -29,13 +29,20 @@ use crate::{
 use lru::LruCache;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
+
+/// Speed-check refreshes waiting or running at once. Background lookups share
+/// 16 slots and queue for them, so without this bound a flood of unique names
+/// would grow the queue and double upstream load without limit.
+const MAX_SPEED_CHECK_REFRESHES: usize = 128;
 
 pub struct DnsCacheMiddleware {
     cfg: Arc<RuntimeConfig>,
     cache: Arc<DnsCache>,
     prefetch_notify: Arc<DomainPrefetchingNotify>,
     client: DnsHandle,
+    refresh_slots: Arc<Semaphore>,
 }
 
 impl DnsCacheMiddleware {
@@ -126,6 +133,7 @@ impl DnsCacheMiddleware {
                 is_background: true,
                 ..Default::default()
             }),
+            refresh_slots: Arc::new(Semaphore::new(MAX_SPEED_CHECK_REFRESHES)),
         };
 
         if cfg.prefetch_domain() {
@@ -185,6 +193,29 @@ impl DnsCacheMiddleware {
                 let dura = most_recent.max(min_interval);
                 prefetch_notify.notify_after(dura).await;
             }
+        });
+    }
+
+    /// Repeats a `fastest-response` lookup in the background. Background
+    /// lookups run as `fastest-ip`, and their answer replaces the cache entry
+    /// the client was served from. When all refresh slots are taken the entry
+    /// stays unprobed until prefetch or expiry refreshes it.
+    fn refresh_with_speed_check(&self, ctx: &DnsContext, query: &Query) {
+        let Ok(slot) = self.refresh_slots.clone().try_acquire_owned() else {
+            return;
+        };
+        if !self.cache.begin_refresh(query) {
+            return;
+        }
+        let mut opts = ctx.server_opts.clone();
+        opts.is_background = true;
+        let client = self.client.with_new_opt(opts);
+        let cache = self.cache.clone();
+        let query = query.clone();
+        tokio::spawn(async move {
+            client.send(query.clone()).await;
+            cache.end_refresh(&query);
+            drop(slot);
         });
     }
 }
@@ -299,6 +330,18 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsCacheMiddl
                         lookup.min_ttl().unwrap_or(0),
                         server_group_name,
                     );
+
+                    // The client was answered without probing; probe in the
+                    // background so the cached entry becomes the fastest address.
+                    // A single address still qualifies: other upstreams may
+                    // return different, closer addresses.
+                    if !ctx.server_opts.is_background
+                        && query.query_type().is_ip_addr()
+                        && matches!(ctx.source, LookupFrom::Server(_))
+                        && crate::dns_mw_ns::refines_cache_by_speed_check(ctx)
+                    {
+                        self.refresh_with_speed_check(ctx, query);
+                    }
 
                     if ctx.cfg().prefetch_domain()
                         && let Some(ttl) = lookup.min_ttl()
@@ -665,6 +708,29 @@ impl DnsCache {
             // must become eligible again without continuously retrying.
             entry.is_in_prefetching = false;
             entry.retry_prefetch_at = Some(now + Duration::from_secs(self.prefetch_time.max(1)));
+        }
+    }
+
+    /// Marks an entry as being refreshed. Returns false when the entry is
+    /// missing or a refresh or prefetch is already running for it.
+    fn begin_refresh(&self, query: &Query) -> bool {
+        let mut cache = self.cache.lock().unwrap();
+        match cache.peek_mut(query) {
+            Some(entry) if !entry.is_in_prefetching => {
+                entry.is_in_prefetching = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Releases the mark set by `begin_refresh`. A successful refresh has
+    /// already replaced the entry, so this only matters after a failure, and
+    /// unlike `finish_prefetch` it does not delay the next prefetch.
+    fn end_refresh(&self, query: &Query) {
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(entry) = cache.peek_mut(query) {
+            entry.is_in_prefetching = false;
         }
     }
 
@@ -1771,6 +1837,211 @@ mod tests {
             .await
             .expect("all queued domains should finish without another incoming query")
             .unwrap();
+    }
+
+    /// Upstream stand-in that answers every query with the given addresses.
+    struct IpUpstream(&'static [&'static str]);
+
+    #[async_trait::async_trait]
+    impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for IpUpstream {
+        async fn handle(
+            &self,
+            ctx: &mut DnsContext,
+            req: &DnsRequest,
+            _next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
+        ) -> Result<DnsResponse, DnsError> {
+            ctx.source = LookupFrom::Server("default".to_string());
+            let query = req.query().original().clone();
+            let records: Vec<Record> = self
+                .0
+                .iter()
+                .map(|ip| {
+                    Record::from_rdata(query.name().clone(), 600, RData::A(ip.parse().unwrap()))
+                })
+                .collect();
+            Ok(DnsResponse::new_with_max_ttl(query, records))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fastest_response_miss_schedules_one_speed_checked_refresh() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+
+        // A single address is refreshed too: other upstreams may know closer ones.
+        for upstream_ips in [&["192.0.2.1"][..], &["192.0.2.1", "192.0.2.2"][..]] {
+            let cfg = Arc::new(
+                RuntimeConfig::builder()
+                    .with("response-mode fastest-response")
+                    .with("speed-check-mode ping,tcp:443")
+                    .with("prefetch-domain no")
+                    .with("cache-persist no")
+                    .build()
+                    .unwrap(),
+            );
+            let (mut background_rx, background_handle) = DnsHandle::mock();
+            let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
+            let cache = cache_middleware.cache().clone();
+            let handler = DnsMiddlewareBuilder::new()
+                .with(cache_middleware)
+                .with(IpUpstream(upstream_ips))
+                .build(cfg);
+
+            let name: Name = "speed.example.".parse().unwrap();
+            let query = Query::query(name.clone(), RecordType::A);
+            let response = handler.lookup(name, RecordType::A).await.unwrap();
+            assert_eq!(
+                response.ip_addrs(),
+                upstream_ips
+                    .iter()
+                    .map(|ip| ip.parse::<IpAddr>().unwrap())
+                    .collect::<Vec<_>>(),
+                "the client must get the unprobed upstream answer"
+            );
+
+            let (message, opts, sender) =
+                tokio::time::timeout(Duration::from_secs(1), background_rx.recv())
+                    .await
+                    .expect("a fastest-response miss must schedule a speed-checked refresh")
+                    .unwrap();
+            assert!(opts.is_background, "background lookups run as fastest-ip");
+            assert_eq!(
+                DnsRequest::try_from(message).unwrap().query().original(),
+                &query
+            );
+            assert!(
+                !cache.begin_refresh(&query),
+                "only one refresh may run for an entry"
+            );
+
+            // A failed refresh must release the entry for later refreshes.
+            drop(sender);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !cache.begin_refresh(&query) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("a finished refresh must release the entry");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_speed_check_refreshes_are_bounded() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+
+        let cfg = Arc::new(
+            RuntimeConfig::builder()
+                .with("response-mode fastest-response")
+                .with("speed-check-mode ping,tcp:443")
+                .with("prefetch-domain no")
+                .with("cache-persist no")
+                .build()
+                .unwrap(),
+        );
+        let (mut background_rx, background_handle) = DnsHandle::mock();
+        let cache_middleware = DnsCacheMiddleware::new(&cfg, background_handle);
+        let all_slots = cache_middleware
+            .refresh_slots
+            .clone()
+            .try_acquire_many_owned(MAX_SPEED_CHECK_REFRESHES as u32)
+            .unwrap();
+        let handler = DnsMiddlewareBuilder::new()
+            .with(cache_middleware)
+            .with(IpUpstream(&["192.0.2.1", "192.0.2.2"]))
+            .build(cfg);
+
+        handler
+            .lookup("full.example.", RecordType::A)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            background_rx.try_recv().is_err(),
+            "no refresh may start while every slot is taken"
+        );
+
+        drop(all_slots);
+        handler
+            .lookup("free.example.", RecordType::A)
+            .await
+            .unwrap();
+        let (message, opts, _) = tokio::time::timeout(Duration::from_secs(1), background_rx.recv())
+            .await
+            .expect("a released slot must allow the next refresh")
+            .unwrap();
+        assert!(opts.is_background);
+        assert_eq!(
+            DnsRequest::try_from(message)
+                .unwrap()
+                .query()
+                .original()
+                .name(),
+            &"free.example.".parse::<Name>().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_other_modes_and_disabled_speed_check_do_not_refresh() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+
+        for directives in [
+            ["response-mode fastest-ip", "speed-check-mode ping"],
+            ["response-mode first-ping", "speed-check-mode ping"],
+            ["response-mode fastest-response", "speed-check-mode none"],
+        ] {
+            let cfg = Arc::new(
+                RuntimeConfig::builder()
+                    .with(directives[0])
+                    .with(directives[1])
+                    .with("prefetch-domain no")
+                    .with("cache-persist no")
+                    .build()
+                    .unwrap(),
+            );
+            let (background_rx, background_handle) = DnsHandle::mock();
+            let handler = DnsMiddlewareBuilder::new()
+                .with(DnsCacheMiddleware::new(&cfg, background_handle))
+                .with(IpUpstream(&["192.0.2.1", "192.0.2.2"]))
+                .build(cfg);
+
+            handler
+                .lookup("speed.example.", RecordType::A)
+                .await
+                .unwrap();
+            assert_eq!(
+                count_background_queries(background_rx).await,
+                0,
+                "{directives:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_refresh_mark_blocks_duplicates_until_released() {
+        let cache = DnsCache::new(10, true, 0, 5);
+        let query = Query::query("mark.example.".parse().unwrap(), RecordType::A);
+        assert!(
+            !cache.begin_refresh(&query),
+            "a missing entry cannot be refreshed"
+        );
+
+        cache.insert_response(
+            DnsResponse::new_with_max_ttl(
+                query.clone(),
+                [Record::from_rdata(
+                    query.name().clone(),
+                    30,
+                    RData::A("192.0.2.1".parse().unwrap()),
+                )],
+            ),
+            Instant::now(),
+            30,
+            "default",
+        );
+        assert!(cache.begin_refresh(&query));
+        assert!(!cache.begin_refresh(&query));
+        cache.end_refresh(&query);
+        assert!(cache.begin_refresh(&query));
     }
 
     async fn count_background_queries(

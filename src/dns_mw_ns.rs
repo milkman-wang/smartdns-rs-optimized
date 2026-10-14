@@ -152,6 +152,29 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
     }
 }
 
+/// Whether a `fastest-response` answer should be followed by a background
+/// speed check. The client keeps the unprobed upstream answer; the refresh runs
+/// as `fastest-ip` (see `is_background` above) and replaces the cache entry, so
+/// later queries get the fastest address. A `none` speed check mode keeps the
+/// plain `fastest-response` behaviour.
+pub(crate) fn refines_cache_by_speed_check(ctx: &DnsContext) -> bool {
+    let cfg = ctx.cfg();
+    let response_mode = ctx
+        .domain_rule
+        .get(|rule| rule.response_mode)
+        .unwrap_or_else(|| cfg.response_mode());
+    let speed_check_mode = ctx
+        .domain_rule
+        .as_ref()
+        .and_then(|rule| rule.speed_check_mode.as_ref())
+        .or_else(|| cfg.speed_check_mode());
+
+    response_mode == ResponseMode::FastestResponse
+        && !ctx.server_opts.no_speed_check()
+        && speed_check_mode
+            .is_some_and(|modes| !modes.is_empty() && !modes.iter().any(|m| m.is_none()))
+}
+
 struct LookupIpOptions<'a> {
     response_strategy: ResponseMode,
     speed_check_mode: Option<&'a SpeedCheckModeList>,

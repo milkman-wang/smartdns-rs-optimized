@@ -12,6 +12,7 @@ listed where they affect operation.
 | `cache-size -1` | Automatic entry capacity based on 1% of physical memory, estimated at 1 KiB per entry, bounded to 512–1,048,576 entries. `0` disables caching. |
 | `cache-mem-size 16MiB` | Evicts LRU entries when their accounted DNS payload and record/cache storage exceed the budget. This is cache accounting, not a process RSS limit. `0` uses only the entry limit. |
 | `serve-expired-prefetch-time 300` | With stale serving and prefetch enabled, schedules positive-record refresh after expiry plus this interval. `0` selects half the stale lifetime, capped at eight hours; an unlimited stale lifetime uses eight hours. Failed refreshes release the in-flight marker and retry after the interval. |
+| `response-mode fastest-response` with a speed check mode | Answers with the first valid upstream response, then refreshes the cache entry with one background `fastest-ip` lookup, so later queries return the measured fastest address. At most one refresh runs per entry, and a failed refresh releases it without delaying prefetch. `speed-check-mode none` keeps the unprobed behaviour. |
 | Cache persistence | Preserves complete response sections, probe results and absolute expiry times across restart. Existing cache files remain readable. |
 | `max-query-limit 128` | Limits foreground queries; excess queries receive REFUSED. Background refreshes retain their separate concurrency limit. `0` disables the foreground limit. |
 | Listener `-no-serve-expired` | Applies alongside global and domain stale-response policy. |
