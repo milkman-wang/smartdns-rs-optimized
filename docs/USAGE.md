@@ -90,6 +90,26 @@ server-h3 223.5.5.5
 server-quic 223.5.5.5
 ```
 
+### 先远程、结果是国内 IP 再问国内 DNS
+
+仅 SmartDNS-rs 支持。把不在名单里的域名交给远程 DNS，国外域名就不会发给国内 DNS；但这样一来，名单之外的国内网站拿到的是远程 DNS 给的地址，不一定是最近的节点。域名规则加上 `-recheck-nameserver` 和 `-recheck-ip-set` 后，查询分两步：
+
+1. 先按规则的 `-nameserver` 分组查询。
+2. 回答里有地址落在 `-recheck-ip-set` 指定的 ip-set 里，就再向 `-recheck-nameserver` 分组查一次。第二次的回答里也有该 ip-set 的地址时用它；查询失败或地址都不在 ip-set 里时，保留第一次的回答。
+
+```conf
+server 8.8.8.8 -group remote -exclude-default-group
+server 223.5.5.5 -group china -exclude-default-group
+ip-set -name chnroute -file /etc/smartdns/chnroute.txt
+
+domain-rules /./ -nameserver remote -recheck-nameserver china -recheck-ip-set chnroute
+```
+
+- 只对 A/AAAA 查询生效。重查后的结果照常缓存，预取刷新时同样会重查。
+- 只看选出分组的那条规则：自己写了 `-nameserver` 的域名（例如国内名单、GFW 名单）不继承上级的重查；监听时用 `-group` 指定了分组的端口也不重查。因此只有回答是国内地址的域名才会发给国内 DNS。
+- 两个选项可以单独写一行，合并到已有的同名规则上。例如 Passwall 的默认 DNS 选远程时，在它生成的配置之后加一行 `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` 即可。
+- 只有触发重查的域名在未命中缓存时多查一次；没有配置重查的规则不受影响。
+
 
 
 更多高级的配置请参考 [这里](https://github.com/pymumu/smartdns/blob/doc/docs/configuration.md)

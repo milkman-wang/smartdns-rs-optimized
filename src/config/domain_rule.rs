@@ -35,6 +35,13 @@ pub struct DomainRule {
     pub rr_ttl_max: Option<u64>,
 
     pub subnet: Option<ClientSubnet>,
+
+    /// The group that repeats an address lookup when the answer from this
+    /// rule's `nameserver` has an address in `recheck_ip_set`.
+    pub recheck_nameserver: Option<String>,
+
+    /// The ip-set whose addresses send an answer to `recheck_nameserver`.
+    pub recheck_ip_set: Option<String>,
 }
 
 impl std::ops::AddAssign for DomainRule {
@@ -78,5 +85,34 @@ impl std::ops::AddAssign for DomainRule {
         }
 
         self.rr_ttl_max = rhs.rr_ttl_max.or(self.rr_ttl_max);
+
+        if rhs.recheck_nameserver.is_some() {
+            self.recheck_nameserver = rhs.recheck_nameserver;
+        }
+        if rhs.recheck_ip_set.is_some() {
+            self.recheck_ip_set = rhs.recheck_ip_set;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recheck_merges_into_a_rule_with_a_nameserver() {
+        let mut rule = DomainRule {
+            nameserver: Some("remote".to_string()),
+            ..Default::default()
+        };
+        rule += DomainRule {
+            recheck_nameserver: Some("china".to_string()),
+            recheck_ip_set: Some("cn".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(rule.nameserver.as_deref(), Some("remote"));
+        assert_eq!(rule.recheck_nameserver.as_deref(), Some("china"));
+        assert_eq!(rule.recheck_ip_set.as_deref(), Some("cn"));
     }
 }

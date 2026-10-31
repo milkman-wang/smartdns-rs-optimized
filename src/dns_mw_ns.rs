@@ -13,7 +13,8 @@ use crate::{
     dns_client::{DnsClient, GenericResolver, NameServerGroup},
     dns_conf::RuntimeConfig,
     dns_error::LookupError,
-    log::{debug, error},
+    dns_rule::DomainRuleTreeNode,
+    log::{debug, error, warn},
     middleware::*,
 };
 
@@ -100,8 +101,10 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
 
         let group_name = ctx.server_group_name().to_string();
 
+        let mdns_lookup = ctx.cfg().mdns_lookup() && LOCAL.zone_of(name);
+
         let name_server = {
-            let name_server = if ctx.cfg().mdns_lookup() && LOCAL.zone_of(name) {
+            let name_server = if mdns_lookup {
                 client.get_server_group("mdns").await
             } else {
                 None
@@ -134,31 +137,46 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
 
         ctx.source = LookupFrom::Server(group_name.to_string());
 
-        if rtype.is_ip_addr() {
-            if let Some(speed_check_mode) = deferred_speed_check_mode(ctx, req)
-                && let Ok(permit) = self.deferred_speed_checks.clone().try_acquire_owned()
-            {
-                let (first, rest) = lookup_ip_answering_first(
-                    name_server,
-                    name.clone(),
-                    ctx.cfg().clone(),
-                    speed_check_mode.clone(),
-                    lookup_options,
-                )
-                .await;
-                if let Some(rest) = rest {
-                    let group_name = group_name.clone();
-                    ctx.pending_speed_check.set(
-                        async move {
-                            let _permit = permit;
-                            rest.await.map(|res| res.with_name_server_group(group_name))
-                        }
-                        .boxed(),
-                    );
-                }
-                return first.map(|res| res.with_name_server_group(group_name));
-            }
+        if !rtype.is_ip_addr() {
+            return name_server
+                .lookup(name.clone(), lookup_options)
+                .await
+                .map(|res| res.with_name_server_group(group_name));
+        }
 
+        let recheck = if mdns_lookup {
+            None
+        } else {
+            Recheck::find(ctx.domain_rule.as_deref(), &group_name)
+        };
+
+        // A recheck needs the whole answer, so it skips the early answer.
+        if recheck.is_none()
+            && let Some(speed_check_mode) = deferred_speed_check_mode(ctx, req)
+            && let Ok(permit) = self.deferred_speed_checks.clone().try_acquire_owned()
+        {
+            let (first, rest) = lookup_ip_answering_first(
+                name_server,
+                name.clone(),
+                ctx.cfg().clone(),
+                speed_check_mode.clone(),
+                lookup_options,
+            )
+            .await;
+            if let Some(rest) = rest {
+                let group_name = group_name.clone();
+                ctx.pending_speed_check.set(
+                    async move {
+                        let _permit = permit;
+                        rest.await.map(|res| res.with_name_server_group(group_name))
+                    }
+                    .boxed(),
+                );
+            }
+            return first.map(|res| res.with_name_server_group(group_name));
+        }
+
+        let (res, rechecked_by) = {
             let cfg = ctx.cfg();
 
             let mut opts = LookupIpOptions {
@@ -183,12 +201,104 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
                 opts.response_strategy = ResponseMode::FastestIp;
             }
 
-            lookup_ip(name_server.deref(), name.clone(), &opts).await
-        } else {
-            name_server.lookup(name.clone(), lookup_options).await
+            let res = lookup_ip(name_server.deref(), name.clone(), &opts).await;
+
+            match recheck {
+                Some(recheck) => recheck.lookup(client, cfg, name, &opts, res).await,
+                None => (res, None),
+            }
+        };
+
+        // The cache keeps a rechecked answer under the group the rules chose,
+        // so the next query finds it; the audit log names the group that
+        // answered.
+        if let Some(group) = rechecked_by {
+            ctx.source = LookupFrom::Server(group.to_string());
         }
-        .map(|res| res.with_name_server_group(group_name))
+
+        res.map(|res| res.with_name_server_group(group_name))
     }
+}
+
+/// A `-recheck-nameserver` domain rule that applies to a lookup.
+struct Recheck<'a> {
+    group: &'a str,
+    ip_set: &'a str,
+}
+
+impl<'a> Recheck<'a> {
+    /// The rule that chose `group_name` decides. A name whose own rule sets
+    /// `-nameserver` does not inherit a parent zone's recheck, and a bind
+    /// `-group` that overrides the rules turns the recheck off.
+    fn find(domain_rule: Option<&'a DomainRuleTreeNode>, group_name: &str) -> Option<Self> {
+        let mut node = domain_rule;
+        while let Some(rule) = node {
+            if let Some(nameserver) = rule.nameserver.as_deref() {
+                let group = rule.recheck_nameserver.as_deref()?;
+                if nameserver != group_name || group == group_name {
+                    return None;
+                }
+                return Some(Self {
+                    group,
+                    ip_set: rule.recheck_ip_set.as_deref()?,
+                });
+            }
+            node = rule.zone().map(|zone| &**zone);
+        }
+        None
+    }
+
+    /// Asks the recheck group when `res` has an address in the ip-set, and
+    /// takes its answer only if that has one too. Otherwise, or if the
+    /// group fails, `res` stands. Also returns the group whose answer is
+    /// used, if it is the recheck group.
+    async fn lookup(
+        &self,
+        client: &DnsClient,
+        cfg: &RuntimeConfig,
+        name: &Name,
+        options: &LookupIpOptions<'_>,
+        res: Result<DnsResponse, LookupError>,
+    ) -> (Result<DnsResponse, LookupError>, Option<&'a str>) {
+        let Some(ips) = cfg.recheck_ip_set(self.ip_set) else {
+            return (res, None);
+        };
+        if !matches!(&res, Ok(answer) if has_ip_in(answer, ips)) {
+            return (res, None);
+        }
+        let Some(server) = client.get_server_group(self.group).await else {
+            warn!("recheck nameserver group {} not found", self.group);
+            return (res, None);
+        };
+        match lookup_ip(server.deref(), name.clone(), options).await {
+            Ok(answer) if has_ip_in(&answer, ips) => {
+                debug!(
+                    "recheck {} via [Group: {}] ip {:?}",
+                    name,
+                    self.group,
+                    answer.ip_addrs()
+                );
+                (Ok(answer), Some(self.group))
+            }
+            other => {
+                debug!(
+                    "recheck {} via [Group: {}] keeps the first answer: {:?}",
+                    name,
+                    self.group,
+                    other.map(|answer| answer.ip_addrs())
+                );
+                (res, None)
+            }
+        }
+    }
+}
+
+/// Whether an answer has an address in `ips`.
+fn has_ip_in(res: &DnsResponse, ips: &IpSet) -> bool {
+    res.answers()
+        .iter()
+        .filter_map(|record| record.data().ip_addr())
+        .any(|ip| ips.contains(&ip))
 }
 
 /// The probe modes of a `fastest-response` lookup that should keep its speed
@@ -1574,5 +1684,214 @@ mod tests {
                 }
                 assert!(success);
             });
+    }
+
+    /// A UDP upstream that answers A queries from a fixed table and counts
+    /// them.
+    async fn table_upstream(
+        table: &[(&str, &str)],
+    ) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use crate::libdns::proto::op::Message;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let queries = count.clone();
+        let table: Vec<(String, IpAddr)> = table
+            .iter()
+            .map(|(name, ip)| (name.to_string(), ip.parse().unwrap()))
+            .collect();
+        tokio::spawn(async move {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let Ok((len, peer)) = socket.recv_from(&mut buffer).await else {
+                    continue;
+                };
+                let Ok(request) = Message::from_vec(&buffer[..len]) else {
+                    continue;
+                };
+                let mut response = request.to_response();
+                response.set_recursion_available(true);
+                if let Some(query) = request.queries().first()
+                    && query.query_type() == RecordType::A
+                {
+                    let asked = query.name().to_string();
+                    // Only names in the table count: the client also warms
+                    // up its connections with a query of its own.
+                    if let Some((_, ip)) = table
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(&asked))
+                    {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        response.add_answer(Record::from_rdata(
+                            query.name().clone(),
+                            600,
+                            RData::from(*ip),
+                        ));
+                    }
+                }
+                let _ = socket.send_to(&response.to_vec().unwrap(), peer).await;
+            }
+        });
+        (addr, queries)
+    }
+
+    /// Cache and name server middlewares over a `remote` and a `china`
+    /// upstream. Every name goes to `remote`, and answers in the Cloudflare
+    /// test ranges are rechecked on `china`, except for `listed.example`,
+    /// whose own rule sets the nameserver.
+    struct RecheckHarness {
+        handler: crate::dns_mw::DnsMiddlewareHandler,
+        remote: Arc<std::sync::atomic::AtomicUsize>,
+        china: Arc<std::sync::atomic::AtomicUsize>,
+        _background: tokio::sync::mpsc::UnboundedReceiver<crate::server::IncomingDnsMessage>,
+    }
+
+    async fn recheck_harness() -> RecheckHarness {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+        use crate::dns_mw_cache::DnsCacheMiddleware;
+        use crate::server::DnsHandle;
+
+        let (remote_addr, remote) = table_upstream(&[
+            ("cn.example.", "104.16.0.1"),
+            ("foreign.example.", "192.0.2.1"),
+            ("listed.example.", "104.16.0.1"),
+            ("poisoned.example.", "104.16.0.1"),
+        ])
+        .await;
+        let (china_addr, china) = table_upstream(&[
+            ("cn.example.", "104.16.0.2"),
+            ("foreign.example.", "104.16.0.2"),
+            ("listed.example.", "104.16.0.2"),
+            ("poisoned.example.", "192.0.2.9"),
+        ])
+        .await;
+        let directives = [
+            "prefetch-domain no".to_string(),
+            "cache-persist no".to_string(),
+            "speed-check-mode none".to_string(),
+            format!("server {remote_addr} -group remote -exclude-default-group"),
+            format!("server {china_addr} -group china -exclude-default-group"),
+            format!(
+                "ip-set -name cn -file {}/tests/test_data/cf-ipv4.txt",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            "domain-rules /./ -nameserver remote".to_string(),
+            "domain-rules /./ -recheck-nameserver china -recheck-ip-set cn".to_string(),
+            "domain-rules /listed.example/ -nameserver remote".to_string(),
+        ];
+        let cfg = directives
+            .iter()
+            .fold(RuntimeConfig::builder(), |builder, directive| {
+                builder.with(directive)
+            })
+            .build()
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let (background, background_handle) = DnsHandle::mock();
+        let handler = DnsMiddlewareBuilder::new()
+            .with(DnsCacheMiddleware::new(&cfg, background_handle))
+            .with(NameServerMiddleware::new(cfg.create_dns_client().await))
+            .build(cfg);
+        RecheckHarness {
+            handler,
+            remote,
+            china,
+            _background: background,
+        }
+    }
+
+    async fn lookup_a(handler: &crate::dns_mw::DnsMiddlewareHandler, name: &str) -> Vec<IpAddr> {
+        handler
+            .lookup(name, RecordType::A)
+            .await
+            .unwrap()
+            .ip_addrs()
+    }
+
+    #[tokio::test]
+    async fn test_recheck_answers_from_the_recheck_group_and_caches_it() {
+        use std::sync::atomic::Ordering;
+
+        let harness = recheck_harness().await;
+        for _ in 0..2 {
+            assert_eq!(
+                lookup_a(&harness.handler, "cn.example.").await,
+                vec!["104.16.0.2".parse::<IpAddr>().unwrap()]
+            );
+        }
+        // The second lookup is a cache hit.
+        assert_eq!(harness.remote.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.china.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_recheck_never_sends_an_answer_outside_the_set() {
+        use std::sync::atomic::Ordering;
+
+        let harness = recheck_harness().await;
+        assert_eq!(
+            lookup_a(&harness.handler, "foreign.example.").await,
+            vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(harness.china.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_recheck_is_not_inherited_by_a_rule_with_its_own_nameserver() {
+        use std::sync::atomic::Ordering;
+
+        let harness = recheck_harness().await;
+        assert_eq!(
+            lookup_a(&harness.handler, "listed.example.").await,
+            vec!["104.16.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(harness.china.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_recheck_keeps_the_first_answer_if_the_recheck_answer_is_outside_the_set() {
+        use std::sync::atomic::Ordering;
+
+        let harness = recheck_harness().await;
+        assert_eq!(
+            lookup_a(&harness.handler, "poisoned.example.").await,
+            vec!["104.16.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(harness.china.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_recheck_follows_the_rule_that_chose_the_group() {
+        let cfg = [
+            "domain-rules /./ -nameserver remote",
+            "domain-rules /./ -recheck-nameserver china -recheck-ip-set cn",
+            "domain-rules /listed.example/ -nameserver remote",
+            "domain-rules /cn.example/ -nameserver china",
+            "domain-rules /zone.example/ -nameserver remote -recheck-nameserver china -recheck-ip-set cn",
+            "domain-rules /addr.zone.example/ -address #6",
+        ]
+        .iter()
+        .fold(RuntimeConfig::builder(), |builder, directive| {
+            builder.with(directive)
+        })
+        .build()
+        .unwrap();
+        let find = |name: &str, group_name: &str| {
+            let rule = cfg.find_domain_rule(&name.parse().unwrap(), "");
+            Recheck::find(rule.as_deref(), group_name)
+                .map(|recheck| (recheck.group.to_string(), recheck.ip_set.to_string()))
+        };
+        let recheck = Some(("china".to_string(), "cn".to_string()));
+
+        assert_eq!(find("unlisted.example.", "remote"), recheck);
+        // A rule without -nameserver takes the group and the recheck from the
+        // zone rule that chose the group.
+        assert_eq!(find("www.addr.zone.example.", "remote"), recheck);
+        assert_eq!(find("www.listed.example.", "remote"), None);
+        assert_eq!(find("cn.example.", "china"), None);
+        // A bind -group that overrides the rules turns the recheck off.
+        assert_eq!(find("unlisted.example.", "china"), None);
     }
 }

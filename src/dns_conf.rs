@@ -59,6 +59,9 @@ pub struct RuntimeConfig {
     /// List of IPs that will be ignored
     ignore_ip: Arc<IpSet>,
 
+    /// The ip-sets named by `-recheck-ip-set` domain rules
+    recheck_ip_sets: HashMap<String, IpSet>,
+
     ip_alias: Arc<IpMap<Arc<[IpAddr]>>>,
 }
 
@@ -383,6 +386,11 @@ impl RuntimeConfig {
     #[inline]
     pub fn ignore_ip(&self) -> &Arc<IpSet> {
         &self.ignore_ip
+    }
+    /// The addresses of an ip-set named by a `-recheck-ip-set` domain rule
+    #[inline]
+    pub fn recheck_ip_set(&self, name: &str) -> Option<&IpSet> {
+        self.recheck_ip_sets.get(name)
     }
 
     pub fn ip_alias(&self) -> &Arc<IpMap<Arc<[IpAddr]>>> {
@@ -745,6 +753,26 @@ impl RuntimeConfigBuilder {
         let whitelist_ip = make_ip_set(&cfg.whitelist_ip);
         let ignore_ip = make_ip_set(&cfg.ignore_ip);
 
+        // Only the ip-sets that recheck rules name are needed at query time.
+        let recheck_ip_sets = self
+            .rule_groups
+            .values()
+            .flat_map(|group| &group.domain_rules)
+            .filter_map(|rule| rule.config.recheck_ip_set.as_deref())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|name| {
+                let nets = cfg
+                    .ip_sets
+                    .get(name)
+                    .map_or(&[][..], |nets| nets.as_slice());
+                if nets.is_empty() {
+                    warn!("recheck ip-set {name} is unknown or empty");
+                }
+                (name.to_string(), IpSet::new(nets.iter().copied()))
+            })
+            .collect();
+
         let ip_alias = cfg.ip_alias.iter().flat_map(|alias| {
             let to = std::iter::repeat(alias.to.clone());
             get_ip_set(&alias.ip, &cfg).iter().copied().zip(to)
@@ -914,6 +942,7 @@ impl RuntimeConfigBuilder {
             blacklist_ip,
             whitelist_ip,
             ignore_ip,
+            recheck_ip_sets,
             ip_alias,
             proxy_servers: Arc::new(proxy_servers),
         })

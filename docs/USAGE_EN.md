@@ -93,6 +93,26 @@ server-h3 1.1.1.1
 server-quic unfiltered.adguard-dns.com
 ```
 
+### Ask a remote resolver first, and a local one for local answers
+
+SmartDNS-rs only. Sending names outside your lists to a remote resolver keeps the local resolver from seeing foreign names, but a local site missing from the lists then gets the remote resolver's address, which may not be the nearest. With `-recheck-nameserver` and `-recheck-ip-set` on a domain rule, a lookup takes two steps:
+
+1. It queries the rule's `-nameserver` group.
+2. If an answer address is in the ip-set named by `-recheck-ip-set`, it queries the `-recheck-nameserver` group once more and uses that answer if it also has an address in the ip-set. If that lookup fails or has no such address, the first answer stands.
+
+```conf
+server 1.1.1.1 -group remote -exclude-default-group
+server 192.168.1.1 -group local -exclude-default-group
+ip-set -name local-nets -file /etc/smartdns/local-nets.txt
+
+domain-rules /./ -nameserver remote -recheck-nameserver local -recheck-ip-set local-nets
+```
+
+- Only A and AAAA lookups are rechecked. A rechecked answer is cached as usual, and prefetch rechecks it again.
+- Only the rule that chose the group counts: a name whose own rule sets `-nameserver` (a domestic or a blocked list, for example) does not inherit a parent's recheck, and a listener bound with `-group` does not recheck. So only names whose answers are local addresses reach the local resolver.
+- The two options can go on a line of their own; they merge into the existing rule for the same name. With Passwall's default DNS set to remote, for example, add `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` after its generated configuration.
+- Only names that trigger a recheck take a second query, and only on a cache miss; rules without a recheck are unaffected.
+
 For supported directives, examples and differences from C SmartDNS, see the [compatibility guide](../docs/C_FEATURE_COMPATIBILITY.md).
 
 ## Built-in diagnostics via `dig`

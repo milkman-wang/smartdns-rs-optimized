@@ -34,6 +34,24 @@ impl NomParser for DomainRule {
                 },
             ),
             map(
+                parse_value(
+                    tag_no_case("recheck-nameserver"),
+                    map(is_not(" \t\r\n"), ToString::to_string),
+                ),
+                |v| {
+                    rule.recheck_nameserver = Some(v);
+                },
+            ),
+            map(
+                parse_value(
+                    tag_no_case("recheck-ip-set"),
+                    map(is_not(" \t\r\n"), ToString::to_string),
+                ),
+                |v| {
+                    rule.recheck_ip_set = Some(v);
+                },
+            ),
+            map(
                 alt((
                     parse_value(
                         alt((tag_no_case("dualstack-ip-selection"), tag("d"))),
@@ -220,6 +238,29 @@ mod tests {
                 "",
                 DomainRule {
                     nameserver: Some("domestic-v4".to_string()),
+                    ..Default::default()
+                }
+            ))
+        );
+        assert_eq!(
+            DomainRule::parse("-nameserver remote -recheck-nameserver china -recheck-ip-set cn"),
+            Ok((
+                "",
+                DomainRule {
+                    nameserver: Some("remote".to_string()),
+                    recheck_nameserver: Some("china".to_string()),
+                    recheck_ip_set: Some("cn".to_string()),
+                    ..Default::default()
+                }
+            ))
+        );
+        assert_eq!(
+            DomainRule::parse("--recheck-nameserver=china -r fastest-ip"),
+            Ok((
+                "",
+                DomainRule {
+                    recheck_nameserver: Some("china".to_string()),
+                    response_mode: Some(ResponseMode::FastestIp),
                     ..Default::default()
                 }
             ))
