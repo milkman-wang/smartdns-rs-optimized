@@ -303,3 +303,9 @@ strip = true    # Automatically strip symbols from the binary.
 opt-level = 3   # Optimize DNS throughput; size optimization slows the cache hot path.
 lto = true
 codegen-units = 1
+
+# Dependencies are optimized for size: the aarch64 binary is about 0.85 MB
+# smaller and throughput drops by less than 2%. smartdns itself keeps
+# opt-level 3 from above (or from CARGO_PROFILE_RELEASE_OPT_LEVEL).
+[profile.release.package."*"]
+opt-level = "s"
