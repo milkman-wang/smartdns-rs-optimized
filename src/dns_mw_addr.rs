@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::dns::*;
+use crate::libdns::proto::op::ResponseCode;
 use crate::libdns::proto::rr::{RData, RecordType};
 use crate::middleware::*;
 
@@ -19,7 +20,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
     ) -> Result<DnsResponse, DnsError> {
         let query_type = req.query().query_type();
 
-        if let Some(rdatas) = handle_rule_addr(query_type, ctx) {
+        if let Some((rdatas, response_code)) = handle_rule_addr(query_type, ctx) {
             let local_ttl = ctx.cfg().local_ttl();
 
             let query = req.query().original().clone();
@@ -27,6 +28,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
             let valid_until = Instant::now() + Duration::from_secs(local_ttl);
 
             let mut lookup = DnsResponse::new_with_deadline(query, [], valid_until);
+            lookup.set_response_code(response_code);
             for data in rdatas {
                 let record = Record::from_rdata(name.clone(), local_ttl as u32, data);
                 if record.record_type() == RecordType::SOA {
@@ -95,7 +97,12 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for AddressMiddle
     }
 }
 
-fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RData>> {
+/// The records and response code a rule answers with in place of the
+/// upstreams, if any.
+fn handle_rule_addr(
+    query_type: RecordType,
+    ctx: &DnsContext,
+) -> Option<(Vec<RData>, ResponseCode)> {
     use RecordType::{A, AAAA, HTTPS};
 
     let cfg = ctx.cfg();
@@ -103,29 +110,26 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
     let rule = ctx.domain_rule.as_ref();
 
     let no_rule_soa = server_opts.no_rule_soa();
+    let soa = || Some((vec![RData::default_soa()], ResponseCode::NoError));
 
     // handle force SOA
     if !no_rule_soa {
         match query_type {
             // force AAAA query return SOA
-            AAAA if server_opts.force_aaaa_soa() || cfg.force_aaaa_soa() => {
-                return Some(vec![RData::default_soa()]);
-            }
+            AAAA if server_opts.force_aaaa_soa() || cfg.force_aaaa_soa() => return soa(),
             // force HTTPS query return SOA
-            HTTPS if server_opts.force_https_soa() || cfg.force_https_soa() => {
-                return Some(vec![RData::default_soa()]);
-            }
+            HTTPS if server_opts.force_https_soa() || cfg.force_https_soa() => return soa(),
             _ => (),
         }
 
         // force specific qtype return SOA
         if cfg.force_qtype_soa().contains(&query_type) {
-            return Some(vec![RData::default_soa()]);
+            return soa();
         }
     }
 
     // skip address rule.
-    if server_opts.no_rule_addr() || !query_type.is_ip_addr() {
+    if server_opts.no_rule_addr() {
         return None;
     }
 
@@ -136,22 +140,32 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
 
         if let Some(address) = rule.address.as_ref() {
             match address {
+                // `#` blocks the name, as in C SmartDNS: NXDOMAIN for every
+                // query type, so that HTTPS records cannot hint at addresses.
+                SOA if !no_rule_soa => {
+                    return Some((vec![RData::default_soa()], ResponseCode::NXDomain));
+                }
+                // The other values concern addresses only.
+                _ if !query_type.is_ip_addr() => return None,
                 Addr { v4, v6 } => {
+                    let answer = |rdatas: Vec<RData>| Some((rdatas, ResponseCode::NoError));
                     match query_type {
                         A => {
                             if let Some(v4) = v4 {
-                                return Some(v4.iter().map(|ip| RData::A((*ip).into())).collect());
+                                return answer(
+                                    v4.iter().map(|ip| RData::A((*ip).into())).collect(),
+                                );
                             }
                         }
                         AAAA => {
                             if let Some(v6) = v6 {
-                                return Some(
+                                return answer(
                                     v6.iter().map(|ip| RData::AAAA((*ip).into())).collect(),
                                 );
                             }
 
                             if let Some(v4) = v4 {
-                                return Some(
+                                return answer(
                                     v4.iter()
                                         .map(|ip| RData::AAAA(ip.to_ipv6_mapped().into()))
                                         .collect(),
@@ -161,16 +175,11 @@ fn handle_rule_addr(query_type: RecordType, ctx: &DnsContext) -> Option<Vec<RDat
                         _ => unreachable!(),
                     }
                     if !no_rule_soa {
-                        return Some(vec![RData::default_soa()]);
+                        return soa();
                     }
                 }
-                SOA if !no_rule_soa => return Some(vec![RData::default_soa()]),
-                SOAv4 if !no_rule_soa && query_type == A => {
-                    return Some(vec![RData::default_soa()]);
-                }
-                SOAv6 if !no_rule_soa && query_type == AAAA => {
-                    return Some(vec![RData::default_soa()]);
-                }
+                SOAv4 if !no_rule_soa && query_type == A => return soa(),
+                SOAv6 if !no_rule_soa && query_type == AAAA => return soa(),
                 IGN => return None, // ignore rule
                 IGNv4 if query_type == A => return None,
                 IGNv6 if query_type == AAAA => return None,
@@ -200,10 +209,41 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn test_blocked_name_is_nxdomain_for_every_type() {
+        let cfg = RuntimeConfig::builder()
+            .with("address /blocked.example/#")
+            .with("address /www.blocked.example/-")
+            .with("address /fixed.example/192.0.2.1")
+            .build()
+            .unwrap();
+        let handler = DnsMockMiddleware::mock(AddressMiddleware).build(cfg);
+        for query_type in [
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::HTTPS,
+            RecordType::SVCB,
+            RecordType::TXT,
+        ] {
+            let response = handler
+                .lookup("ad.blocked.example.", query_type)
+                .await
+                .unwrap();
+            assert_eq!(response.response_code(), op::ResponseCode::NXDomain);
+            assert!(response.answers().is_empty());
+            assert_eq!(response.authorities()[0].data(), &RData::default_soa());
+        }
+        // `-` lifts the block, and a fixed address leaves other types to the
+        // upstreams (the mock has none, so the lookups fail).
+        for name in ["www.blocked.example.", "fixed.example."] {
+            assert!(handler.lookup(name, RecordType::HTTPS).await.is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn test_query_forced_soa_uses_authority_section() {
         for (rule, query_type) in [
             ("force-qtype-SOA 65", RecordType::HTTPS),
-            ("address /blocked.example/#", RecordType::A),
+            ("address /blocked.example/#4", RecordType::A),
             ("force-AAAA-SOA yes", RecordType::AAAA),
         ] {
             let cfg = RuntimeConfig::builder()
