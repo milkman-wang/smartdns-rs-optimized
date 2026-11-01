@@ -52,9 +52,10 @@ pub fn prepare_server_certificate(
     if certificate.exists() && key.exists() {
         let certificates = super::load_certs_from_path(&certificate)?;
         if let Some(cert) = certificates.first() {
-            let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
-                .map_err(|error| anyhow::anyhow!("invalid existing certificate: {error}"))?;
-            if parsed.validity().is_valid() {
+            let (not_before, not_after) = super::der::validity(cert.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("invalid existing certificate"))?;
+            let now = time::OffsetDateTime::now_utc();
+            if not_before <= now && now <= not_after {
                 return Ok((certificate, key));
             }
         }
@@ -104,7 +105,7 @@ pub fn prepare_server_certificate(
         }
     }
     names.extend(
-        local_ip_address::list_afinet_netifas()
+        crate::infra::net::list_afinet_netifas()
             .unwrap_or_default()
             .into_iter()
             .map(|(_, ip)| ip.to_string()),
@@ -143,6 +144,7 @@ pub fn prepare_server_certificate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn test_auto_certificate_chain_san_and_existing_key() {
         let dir = std::env::temp_dir().join(format!("smartdns-cert-{}", rand::random::<u64>()));

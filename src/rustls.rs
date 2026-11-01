@@ -14,6 +14,7 @@ use rustls::{ClientConfig, ServerConfig, sign::CertifiedKey};
 
 use crate::log::warn;
 mod certificate;
+mod der;
 pub use certificate::prepare_server_certificate;
 
 #[derive(Clone)]
@@ -194,11 +195,10 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertificateVerifier {
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         use sha2::{Digest, Sha256};
-        let (_, parsed) =
-            x509_parser::parse_x509_certificate(certificate.as_ref()).map_err(|_| {
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
-            })?;
-        let actual: [u8; 32] = Sha256::digest(parsed.public_key().raw).into();
+        let spki = der::subject_public_key_info(certificate.as_ref()).ok_or(
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding),
+        )?;
+        let actual: [u8; 32] = Sha256::digest(spki).into();
         if actual != self.pin {
             return Err(rustls::Error::General("TLS SPKI pin mismatch".into()));
         }

@@ -16,7 +16,7 @@ pub struct LocalPtrZoneProvider {
 impl LocalPtrZoneProvider {
     pub fn new() -> Self {
         let server_net = {
-            use local_ip_address::list_afinet_netifas;
+            use crate::infra::net::list_afinet_netifas;
             let ips = list_afinet_netifas().unwrap_or_default();
             IpSet::new(ips.into_iter().map(|(_, ip)| ip.into()))
         };

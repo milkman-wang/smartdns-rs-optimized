@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State};
-use byte_unit::rust_decimal::str;
 
 use crate::config::ForwardRule;
 use serde::{Deserialize, Serialize};

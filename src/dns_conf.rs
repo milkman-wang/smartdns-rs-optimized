@@ -713,11 +713,8 @@ impl RuntimeConfigBuilder {
             "cache-size must be -1 or non-negative"
         );
         if cfg.cache.size == Some(-1) {
-            let mut system = sysinfo::System::new();
-            system.refresh_memory();
             // Budget one percent of physical memory, at about 1 KiB per entry.
-            cfg.cache.size =
-                Some((system.total_memory() / 100 / 1024).clamp(512, 1_048_576) as isize);
+            cfg.cache.size = Some((total_memory() / 100 / 1024).clamp(512, 1_048_576) as isize);
         }
 
         if !self.rule_group_stack.is_empty() {
@@ -947,6 +944,28 @@ impl RuntimeConfigBuilder {
             proxy_servers: Arc::new(proxy_servers),
         })
     }
+}
+
+/// The physical memory, in bytes, or 0 if unknown.
+#[cfg(target_os = "linux")]
+fn total_memory() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| {
+            let kib = info
+                .lines()
+                .find_map(|line| line.strip_prefix("MemTotal:"))?;
+            kib.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()
+        })
+        .map_or(0, |kib| kib * 1024)
+}
+
+/// The physical memory, in bytes, or 0 if unknown.
+#[cfg(not(target_os = "linux"))]
+fn total_memory() -> u64 {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    system.total_memory()
 }
 
 impl std::ops::Deref for RuntimeConfigBuilder {

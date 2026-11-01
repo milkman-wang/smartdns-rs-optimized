@@ -9,6 +9,7 @@ pub mod kernel_nftset;
 pub mod mapped_file;
 pub mod mem_bytes;
 pub mod middleware;
+pub mod net;
 pub mod os_release;
 pub mod packet_debug;
 pub mod ping;

@@ -967,27 +967,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dhcproto"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f77998aa4d800695f2a6c746b2350c72ad4512ae556d515b69d12122d5467e05"
-dependencies = [
- "dhcproto-macros",
- "hex",
- "hickory-proto 0.25.2",
- "ipnet",
- "rand 0.9.4",
- "thiserror 2.0.18",
- "url",
-]
-
-[[package]]
-name = "dhcproto-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7993efb860416547839c115490d4951c6d0f8ec04a3594d9dd99d50ed7ec170"
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1439,28 +1418,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hickory-proto"
-version = "0.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
-dependencies = [
- "async-trait",
- "cfg-if",
- "data-encoding",
- "enum-as-inner",
- "futures-channel",
- "futures-util",
- "idna",
- "ipnet",
- "once_cell",
- "rand 0.9.4",
- "thiserror 2.0.18",
- "tinyvec",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "hickory-proto"
 version = "0.26.0-alpha.1"
 source = "git+https://github.com/mokeyish/hickory-dns.git?rev=0.26.0-smartdns.5#feff0ca2369d8339a35a71805a85aa8d906065f2"
 dependencies = [
@@ -1504,7 +1461,7 @@ source = "git+https://github.com/mokeyish/hickory-dns.git?rev=0.26.0-smartdns.5#
 dependencies = [
  "cfg-if",
  "futures-util",
- "hickory-proto 0.26.0-alpha.1",
+ "hickory-proto",
  "ipconfig",
  "moka",
  "once_cell",
@@ -3374,7 +3331,6 @@ dependencies = [
  "console",
  "console-subscriber",
  "csv",
- "dhcproto",
  "either",
  "enum_dispatch",
  "futures",
@@ -3382,7 +3338,7 @@ dependencies = [
  "futures-util",
  "glob",
  "h3-util",
- "hickory-proto 0.26.0-alpha.1",
+ "hickory-proto",
  "hickory-resolver",
  "hostname",
  "http",

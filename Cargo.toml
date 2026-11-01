@@ -182,10 +182,10 @@ ureq = { version = "3.0.12", optional = true, default-features = false, features
 
 # log
 tracing = "0.1"
+# The target filter needs no regex engine, which env-filter would add.
 tracing-subscriber = { version = "0.3", features = [
   "std",
   "fmt",
-  "env-filter",
 ] }
 
 console-subscriber = { version = "0.4.1", optional = true }
@@ -198,8 +198,6 @@ hickory-resolver = { git = "https://github.com/mokeyish/hickory-dns.git", rev = 
   "system-config",
 ] }
 quinn = { version = "0.11.2", default-features = false }
-dhcproto = "0.13.0"
-netdev = "0.37.1"
 
 # ssl
 webpki-roots = "1.0"
@@ -210,7 +208,6 @@ base64 = "0.22"
 sha2 = "0.10"
 pkcs8 = { version = "0.10.2", features = ["std", "pem", "encryption", "getrandom"] }
 rcgen = { version = "0.14.9", default-features = false, features = ["ring", "pem"] }
-x509-parser = "0.18.1"
 time = "0.3"
 
 lru = { version = "0.14", default-features = false }
@@ -227,9 +224,6 @@ which = { version = "8.0.0", optional = true }
 glob = "0.3.3"
 wildcard = "0.3.0"
 
-# process
-sysinfo = { version = "0.36", default-features = false, features = ["system"]}
-
 # proxy
 async-socks5 = { version = "0.6.0", git = "https://github.com/mokeyish/async-socks5.git", rev = "f78eec5" }
 async-http-proxy = { version = "1.2.5", features = [
@@ -242,7 +236,6 @@ url = "2.5.4"
 # regex = "1"
 # rnp = "0.1"
 boomphf = { version = "0.6.0", optional = true }
-local-ip-address = "0.6.1"
 console = { version = "0.15.8", optional = true }
 rangemap = "1.5.1"
 mac-addr = "0.3.0"
@@ -255,6 +248,13 @@ libc = "0.2"
 uzers = { version = "0.12", default-features = false }
 caps = "0.5.5"
 self_update = { version = "0.42.0", default-features = false, features=["archive-tar", "compression-flate2"], optional = true }
+
+# Linux reads interfaces, routes, processes and memory from the kernel
+# directly (src/infra/net.rs, dhcp.rs, process_guard.rs, dns_conf.rs).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+netdev = "0.37.1"
+local-ip-address = "0.6.1"
+sysinfo = { version = "0.36", default-features = false, features = ["system"]}
 
 [target.'cfg(target_os = "android")'.dependencies]
 self_update = { version = "0.42.0", default-features = false, features=["archive-tar", "compression-flate2"], optional = true }
@@ -290,6 +290,8 @@ anyhow = "1.0"
 # Dev-dependencies are not used when compiling a package for building, but are used for compiling tests, examples, and benchmarks.
 [dev-dependencies]
 indoc = "2"
+# Only the tests inspect generated certificates in detail.
+x509-parser = "0.18.1"
 # reqwest = { version = "0.12", default-features = false, features = [
 #   "blocking",
 #   "rustls-tls",

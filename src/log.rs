@@ -3,7 +3,7 @@ use std::{cell::RefCell, env, fmt, io, path::Path, sync::OnceLock};
 pub use tracing::dispatcher::set_default;
 use tracing::{Dispatch, Event, Subscriber, subscriber::DefaultGuard};
 use tracing_subscriber::{
-    EnvFilter,
+    filter::{LevelFilter, Targets},
     fmt::{
         FmtContext, FormatEvent, FormatFields, FormattedFields, MakeWriter, format,
         writer::MakeWriterExt,
@@ -153,7 +153,7 @@ fn internal_make_dispatch<W: for<'writer> MakeWriter<'writer> + 'static + Send +
         *LEVEL_SETTER.lock().unwrap() = Some(Box::new(move |level| {
             let next = level
                 .map(|level| make_filter(level, filter.as_deref()))
-                .unwrap_or_else(|| EnvFilter::new("off"));
+                .unwrap_or_else(Targets::new);
             let _ = handle.reload(next);
         }));
     }
@@ -174,12 +174,31 @@ fn internal_make_dispatch<W: for<'writer> MakeWriter<'writer> + 'static + Send +
     }
 }
 
-#[inline]
-fn make_filter(level: tracing::Level, filter: Option<&str>) -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(tracing::Level::WARN.into())
-        .parse(all_smart_dns(level, filter))
-        .expect("failed to configure tracing/logging")
+/// The `target=level` directives of the filter and of `RUST_LOG`, with
+/// targets that no directive names at WARN unless a bare level says
+/// otherwise. Span and field filters are not supported; such directives are
+/// skipped.
+fn make_filter(level: tracing::Level, filter: Option<&str>) -> Targets {
+    let directives = all_smart_dns(level, filter);
+    let supported = directives
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .filter(|directive| {
+            let ok = directive.parse::<Targets>().is_ok();
+            if !ok {
+                eprintln!("ignoring unsupported log filter directive: {directive}");
+            }
+            ok
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let targets = supported.parse::<Targets>().unwrap_or_default();
+    if targets.default_level().is_some() {
+        targets
+    } else {
+        targets.with_default(LevelFilter::WARN)
+    }
 }
 
 #[inline]
@@ -269,5 +288,28 @@ mod tests {
     #[test]
     fn test_log_level_cmp() {
         assert_eq!(Level::INFO.max(Level::DEBUG), Level::DEBUG);
+    }
+
+    #[test]
+    fn test_filter_targets_and_default_level() {
+        let filter = make_filter(Level::INFO, None);
+        assert!(filter.would_enable("smartdns::dns_mw_ns", &Level::INFO));
+        assert!(!filter.would_enable("smartdns::dns_mw_ns", &Level::DEBUG));
+        assert!(filter.would_enable("named", &Level::INFO));
+        assert!(filter.would_enable("hickory_proto::udp", &Level::WARN));
+        assert!(!filter.would_enable("hickory_proto::udp", &Level::INFO));
+
+        // Unsupported span filters are skipped; the rest still applies.
+        let filter = make_filter(
+            Level::DEBUG,
+            Some("smartdns={level},hickory_proto=error,[lookup]=trace"),
+        );
+        assert!(filter.would_enable("smartdns", &Level::DEBUG));
+        assert!(!filter.would_enable("hickory_proto", &Level::WARN));
+        assert!(filter.would_enable("other", &Level::WARN));
+
+        // A bare level replaces the WARN default.
+        let filter = make_filter(Level::INFO, Some("smartdns={level},error"));
+        assert!(!filter.would_enable("other", &Level::WARN));
     }
 }
