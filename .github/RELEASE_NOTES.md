@@ -1,47 +1,39 @@
-# SmartDNS-rs fastest-response speed check, rr-ttl caching, cache flush and LuCI updates
+# SmartDNS-rs recheck of local answers, C-style rule inheritance, smaller binary and security updates
 
 ## 中文
 
 ### 本次更新
 
-- `response-mode fastest-response` 配置了测速模式时，未缓存的查询仍立即返回最先到达的上游回答；同一次查询随后等待其他上游并测速，缓存改为实测最快的地址，之后的查询直接得到它。与 C 版一致，测速不会再次查询上游。
-- 最多 128 个查询同时在回复后继续测速。大量不重复域名的洪泛下，超出部分按原来的 `fastest-response` 回复，内存和上游查询量不会随之增长。
-- `rr-ttl-min`、`rr-ttl-max` 与 C 版一致，不只改回复里的 TTL，也决定缓存保留多久（包括否定回答和测速后的结果）。之前缓存仍按上游的原始 TTL 过期，例如设置 `rr-ttl-min 600` 时，TTL 为 20 秒的记录每 20 秒就要刷新一次。域名规则里的 `-rr-ttl` 现在生效。
-- 可以不重启就清空 DNS 缓存：LuCI 高级设置里的“清空 DNS 缓存”按钮、`/etc/init.d/smartdns flushcache` 或向进程发送 `SIGUSR1`，都会立即清空缓存及其保存的副本，重启后也不会再载入旧结果；dnsmasq 转发到 SmartDNS-rs 时，同时清空 dnsmasq 的缓存。域名换了新地址时不必再等旧记录过期。
-- LuCI：未写 `enabled` 的规则在界面上显示为启用，生成配置时却被跳过；现在按启用处理，表单也总是写入该选项。
-- LuCI：文本文件编辑框只读取一次，没有修改时保存其他设置不再改写文件；无法读取或超过 uhttpd/rpcd 传输上限的文件改为只读，避免保存时被截断。
-- 域名列表的屏蔽类型与“强制 AAAA SOA”合并为一个 `-address`（SmartDNS 只保留最后一个）；全局设置加载失败时不再生成缺少监听地址的配置。
-- 规则的测速模式可填写组合；下载地址必须以 http:// 或 https:// 开头；支持原版的 `other` 下载类型和 `fatal`、`notice` 日志级别；更新文件失败时显示错误。
-- LuCI（Lua 版）：只修改了自定义配置、规则列表等文本文件时，“保存并应用”会直接重新加载服务，不再提示没有需要应用的更改。
-- LuCI（Lua 版）：设置、上游 DNS 服务器、规则、下载文件和日志分成独立的标签页。编辑框在较窄的屏幕上不再掉到标签下方；宽度 1152px 以下的表格不再变成每格占半行的稀疏卡片，手机上显示为紧凑卡片。
-- Release 只发布内置中文的 Lua 版 LuCI。文件名带上 OpenWrt 版本（`*-openwrt-24.10*.ipk` 与 `*-openwrt-25.12*.apk`），同一版本的包排在一起。
+- 新增域名规则选项 `-recheck-nameserver` 与 `-recheck-ip-set`（仅 SmartDNS-rs 支持）：不在名单里的域名先交给远程 DNS，国外域名不会发给国内 DNS；回答里有地址落在指定 ip-set（例如 chnroute）时，再向国内分组查一次，名单之外的国内网站也能拿到最近的节点。第二次的回答按全局的 `speed-check-mode` 与 `response-mode` 测速选址。Passwall 默认 DNS 选远程时，在 custom.conf 加一行 `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` 即可，同一行可加 `-subnet` 让远程 DNS 按你所在地区回答。详见使用说明。
+- 域名规则与 C 版一样逐项继承上级规则：自己没写的选项（分组、测速、双栈、`-address` 等）沿用最近一条写了它的上级规则，`/./` 也算上级；`rr-ttl` 三项只整体继承。之前根规则从未成为上级，名单规则也不继承任何选项。
+- 规则查找不再为每次查询构造域名，加载 Passwall 名单时未缓存查询快约 5%、缓存命中快约 9%。
+- `address /域名/#` 与 `-address #` 与 C 版一致，对所有查询类型都回答 NXDOMAIN。之前只拦截 A/AAAA，HTTPS、SVCB 等仍会转发上游，其中的 IP 提示可能让被屏蔽的广告服务器照样连上。
+- 没有配置 `server`、系统 resolv.conf 又指向 SmartDNS-rs 自己（OpenWrt 上监听 53 端口时就是如此）时，查询不再转发给自己无限循环、直到内存耗尽；指向自身监听地址的上游会被跳过并记录警告，必要时改用 AliDNS 与 Cloudflare 的 DoH。
+- 兼容 luci-app-smartdns 生成的配置：文件路径可以用单引号（之前广告列表等 domain-set 因此加载失败）；同一域名分多行写的 `-subnet`、`-cname` 现在都会生效。
+- 更新依赖，修复 13 个影响 OpenWrt 版本的安全公告，涉及 rustls、rustls-webpki、webpki-roots、quinn-proto（DoQ/DoH3）、h2 等；tokio 与缓存使用的 lru 的不安全问题也已修复。OpenWrt 24.10 SDK 的 Rust 1.94 仍可编译。
+- 程序体积缩小约 17%（aarch64 OpenWrt 版 10.1 MB → 8.4 MB），用少量自写代码代替了只用到一小部分的依赖，依赖库按体积优化；没有删减任何功能，查询性能基本不变。
 
 ### 升级说明
 
-- 使用 `fastest-response` 并配置了测速模式时无需修改配置。
-- 没有写 `enabled` 选项的规则现在会生效，请确认这些规则确实需要启用。
-- 设置了 `rr-ttl-min` 时，缓存（包括 NXDOMAIN 等否定回答）至少保留该时长，上游记录变化后最长要等这么久才会更新。需要立即生效时可以清空 DNS 缓存。
-- 装过 JS 版 `luci-app-smartdns-rs` 的设备，先卸载它和 `luci-i18n-smartdns-rs-zh-cn`，再安装与它冲突的 `luci-app-smartdns-rs-compat`；OpenWrt 24.10 及以后的官方固件需先安装 `luci-compat`。
+- 被 `#` 屏蔽的域名现在对所有类型回答 NXDOMAIN，不再需要另开解析器拒绝 HTTPS/SVCB。
+- 规则继承后，上级规则（尤其是 `/./`）写的选项会作用到没写这些选项的下级规则和名单，请确认符合预期。
+- 重查的回答要测速时需在全局写 `speed-check-mode`，例如 C 版默认的 `speed-check-mode ping,tcp:80,tcp:443`；SmartDNS-rs 不写时不测速。
 
 ## English
 
 ### Changes in this update
 
-- With `response-mode fastest-response` and a speed check mode, a cache miss is still answered with the first upstream reply. The same lookup then waits for the other upstreams and probes their addresses, and the cache keeps the measured fastest address for later queries. As in C SmartDNS, no upstream is queried twice for this.
-- At most 128 lookups keep probing after their answer at once. Under a flood of unique names the rest answer as plain `fastest-response`, so memory and upstream load do not grow with it.
-- `rr-ttl-min` and `rr-ttl-max` now decide how long the cache keeps an answer, as in C SmartDNS, not only the TTL in replies; negative and speed-checked answers included. Previously the cache still expired answers at the upstream TTL, so with `rr-ttl-min 600` a record with a 20 s TTL was refreshed every 20 s. A domain rule's `-rr-ttl` now takes effect.
-- The DNS cache can be emptied without a restart: the Clear DNS Cache button in LuCI's advanced settings, `/etc/init.d/smartdns flushcache` or `SIGUSR1` empty the cache and its saved copy at once, so a restart does not load the old answers back either. When dnsmasq forwards to SmartDNS-rs, its cache is cleared too. A domain that moved to new addresses no longer has to wait for the old records to expire.
-- LuCI: rules without an `enabled` option were shown as enabled but skipped when generating the configuration. They now take effect, and the forms always write the option.
-- LuCI: text file editors read each file once and leave an untouched file alone when other settings are saved. Files that cannot be read or exceed what uhttpd and rpcd can carry are shown read-only instead of being truncated on save.
-- A domain list's block type and force AAAA SOA are combined into one `-address`, because SmartDNS keeps only the last one. A global section that fails part-way no longer produces a configuration without listeners.
-- Rule speed check modes accept combinations, download URLs must start with http:// or https://, the original app's `other` download type and the `fatal` and `notice` log levels are supported, and file update failures are shown.
-- LuCI (Lua): when only text files such as the custom configuration or rule lists changed, Save & Apply now reloads the service instead of reporting that there is nothing to apply.
-- LuCI (Lua): Settings, Upstream DNS Servers, Rules, Download Files and Log are separate tabs. Editors no longer drop below their labels on narrower screens, tables narrower than 1152px no longer turn into sparse cards with every cell at half width, and phones show compact cards.
-- Releases publish only the Lua LuCI app, with Chinese built in. File names carry the OpenWrt release (`*-openwrt-24.10*.ipk` and `*-openwrt-25.12*.apk`), so each release's packages sort together.
+- New domain rule options `-recheck-nameserver` and `-recheck-ip-set` (SmartDNS-rs only). Names outside your lists go to a remote resolver, so foreign names never reach the local one; when an answer has an address in the given ip-set (chnroute, for example), the local group is asked once more, so local sites missing from the lists still get their nearest servers. The second answer is speed-checked by the global `speed-check-mode` and `response-mode`. With Passwall's default DNS set to remote, add `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` to custom.conf; a `-subnet` on the same line makes the remote resolver answer for your region. See the usage guide.
+- Domain rules inherit from parent rules option by option, as in C SmartDNS: an option a rule does not set (group, speed check, dual-stack, `-address` and so on) comes from the nearest parent rule that sets it, `/./` included; the three `rr-ttl` options are inherited only together. Previously the root rule was never a parent, and list rules inherited nothing.
+- Rule lookups no longer build names for each query: with Passwall's lists, uncached queries are about 5% faster and cache hits about 9% faster.
+- `address /name/#` and `-address #` answer NXDOMAIN for every query type, as in C SmartDNS. Previously only A and AAAA were blocked; HTTPS, SVCB and other types still went upstream, and their address hints could let a blocked ad server be reached anyway.
+- With no `server` configured and the system resolv.conf naming SmartDNS-rs itself, as on OpenWrt with SmartDNS-rs on port 53, queries are no longer sent back to itself in a loop until memory runs out. Upstreams that are one of its own listeners are skipped with a warning, and AliDNS and Cloudflare over HTTPS stand in when needed.
+- Configurations from luci-app-smartdns work as they do with C SmartDNS: file paths may be single-quoted (domain sets such as ad lists failed to load before), and `-subnet` and `-cname` in domain rules take effect, also when written on a separate line for the same name.
+- Dependencies are updated, fixing 13 advisories that affected the OpenWrt build, in rustls, rustls-webpki, webpki-roots, quinn-proto (DoQ, DoH3), h2 and more; unsoundness in tokio and in the cache's lru is fixed too. The Rust 1.94 of the OpenWrt 24.10 SDK still builds it.
+- The binary is about 17% smaller (aarch64 OpenWrt build 10.1 MB to 8.4 MB): a little code of its own replaces dependencies that were barely used, and dependencies are optimized for size. No feature is removed, and query performance is about the same.
 
 ### Upgrade notes
 
-- No configuration change is needed for `fastest-response` with a speed check mode.
-- Rules saved without an `enabled` option now take effect. Check that such rules should be enabled.
-- With `rr-ttl-min` set, the cache keeps answers, including NXDOMAIN and other negative answers, at least that long, so an upstream change can take that long to show. Empty the DNS cache to see it at once.
-- Devices with the JavaScript `luci-app-smartdns-rs` should remove it and `luci-i18n-smartdns-rs-zh-cn`, then install `luci-app-smartdns-rs-compat`, which conflicts with it. Official OpenWrt 24.10 and later firmware needs `luci-compat` first.
+- Names blocked with `#` now get NXDOMAIN for every type, so no extra resolver is needed to refuse HTTPS and SVCB.
+- With inheritance, options set on parent rules, `/./` in particular, now apply to child rules and lists that do not set them. Check that this is what you want.
+- To speed-check rechecked answers, set `speed-check-mode` globally, for example to the C SmartDNS default `speed-check-mode ping,tcp:80,tcp:443`; SmartDNS-rs checks nothing without it.
