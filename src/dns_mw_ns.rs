@@ -1869,6 +1869,7 @@ mod tests {
             "domain-rules /./ -recheck-nameserver china -recheck-ip-set cn",
             "domain-rules /listed.example/ -nameserver remote",
             "domain-rules /cn.example/ -nameserver china",
+            "domain-rules /addr.example/ -address #6",
             "domain-rules /zone.example/ -nameserver remote -recheck-nameserver china -recheck-ip-set cn",
             "domain-rules /addr.zone.example/ -address #6",
         ]
@@ -1886,8 +1887,9 @@ mod tests {
         let recheck = Some(("china".to_string(), "cn".to_string()));
 
         assert_eq!(find("unlisted.example.", "remote"), recheck);
-        // A rule without -nameserver takes the group and the recheck from the
-        // zone rule that chose the group.
+        // A rule without -nameserver inherits the group and the recheck from
+        // the rule that sets them, the root included.
+        assert_eq!(find("www.addr.example.", "remote"), recheck);
         assert_eq!(find("www.addr.zone.example.", "remote"), recheck);
         assert_eq!(find("www.listed.example.", "remote"), None);
         assert_eq!(find("cn.example.", "china"), None);

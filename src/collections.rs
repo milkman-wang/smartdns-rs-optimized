@@ -147,6 +147,20 @@ impl<T> DomainMap<T> {
         None
     }
 
+    /// The value inserted for exactly this name and kind.
+    pub fn get_exact(&self, name: &WildcardName) -> Option<&T> {
+        let wire = WireName::new(name.iter())?;
+        match name {
+            WildcardName::Sub(wildcard, _) => self
+                .subs
+                .get(&key(SUB, wire.parent(0)))?
+                .iter()
+                .find(|(w, _)| w == wildcard)
+                .map(|(_, value)| value),
+            _ => self.map.get(&key(kind(name), wire.parent(0))),
+        }
+    }
+
     #[inline]
     pub fn contains(&self, domain: &Name) -> bool {
         self.find(domain).is_some()
@@ -593,6 +607,32 @@ mod tests {
         // A wildcard query name is matched as its parent.
         assert_eq!(map.find(&"*.com".parse().unwrap()), Some(&0));
         assert_eq!(map.find(&"*.example.com".parse().unwrap()), Some(&1));
+    }
+
+    #[test]
+    fn test_get_exact_insert_and_remove() {
+        let mut map = DomainMap::new();
+        let names = [
+            "example.com",
+            "+.example.com",
+            "*.example.com",
+            "a*b.example.com",
+            "-.example.com",
+        ]
+        .map(|name| WildcardName::from_str(name).unwrap());
+        for (value, name) in names.iter().enumerate() {
+            assert_eq!(map.insert(name.clone(), value), None);
+        }
+        assert_eq!(map.len(), names.len());
+        for (value, name) in names.iter().enumerate() {
+            assert_eq!(map.get_exact(name), Some(&value));
+        }
+
+        assert_eq!(map.insert(names[2].clone(), 10), Some(2));
+        assert_eq!(map.remove(&names[2]), Some(10));
+        assert_eq!(map.get_exact(&names[2]), None);
+        assert_eq!(map.get_exact(&names[3]), Some(&3));
+        assert_eq!(map.len(), names.len() - 1);
     }
 
     #[test]

@@ -44,6 +44,52 @@ pub struct DomainRule {
     pub recheck_ip_set: Option<String>,
 }
 
+impl DomainRule {
+    /// This rule with each option it does not set taken from `parent`, the
+    /// rule of a parent domain, as C SmartDNS takes every option from the
+    /// most specific rule that sets it.
+    ///
+    /// Like the TTL rule slot in C SmartDNS, `rr-ttl`, `rr-ttl-min` and
+    /// `rr-ttl-max` are inherited only together. The recheck options go
+    /// with the nameserver: a rule that sets its own `nameserver` keeps
+    /// its own recheck, if any.
+    pub fn inherit(&self, parent: &DomainRule) -> DomainRule {
+        let mut rule = self.clone();
+
+        macro_rules! fill {
+            ($($field:ident),+) => {$(
+                if rule.$field.is_none() {
+                    rule.$field = parent.$field.clone();
+                }
+            )+};
+        }
+
+        if rule.nameserver.is_none() {
+            fill!(recheck_nameserver, recheck_ip_set);
+        }
+        if rule.rr_ttl.is_none() && rule.rr_ttl_min.is_none() && rule.rr_ttl_max.is_none() {
+            fill!(rr_ttl, rr_ttl_min, rr_ttl_max);
+        }
+        fill!(
+            nameserver,
+            address,
+            cname,
+            srv,
+            txt,
+            https,
+            speed_check_mode,
+            dualstack_ip_selection,
+            response_mode,
+            no_cache,
+            no_serve_expired,
+            nftset,
+            ipset,
+            subnet
+        );
+        rule
+    }
+}
+
 impl std::ops::AddAssign for DomainRule {
     fn add_assign(&mut self, rhs: Self) {
         if let Some(txt) = rhs.txt {
