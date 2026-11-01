@@ -136,7 +136,9 @@ async fn exchange(packet: &[u8], sequence: u32) -> io::Result<Vec<Vec<u8>>> {
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
-    let fd = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(raw) })?;
+    // SAFETY: `raw` is a socket just opened here, and the AsyncFd owns it as an
+    // OwnedFd, so the descriptor stays open and unchanged while registered.
+    let fd = unsafe { tokio::io::unix::AsyncFd::register(OwnedFd::from_raw_fd(raw)) }?;
     let mut peer: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     peer.nl_family = libc::AF_NETLINK as u16;
     if unsafe {

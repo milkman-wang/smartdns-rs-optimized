@@ -123,7 +123,9 @@ async fn probe(dest: SocketAddr) -> Result<Duration, PingError> {
     let mut peer = dest;
     peer.set_port(0);
     socket.connect(&peer.into())?;
-    let socket = AsyncFd::new(socket)?;
+    // SAFETY: the AsyncFd owns the socket, so its descriptor stays open and
+    // unchanged while registered.
+    let socket = unsafe { AsyncFd::register(socket) }.map_err(io::Error::from)?;
     let seq = rand::random::<u32>();
     let packet = tcp_packet(source, dest, seq, 0, 0x02);
     let start = Instant::now();

@@ -210,7 +210,7 @@ pkcs8 = { version = "0.10.2", features = ["std", "pem", "encryption", "getrandom
 rcgen = { version = "0.14.9", default-features = false, features = ["ring", "pem"] }
 time = "0.3"
 
-lru = { version = "0.14", default-features = false }
+lru = { version = "0.19", default-features = false }
 # time = "0.3"
 chrono = { version = "0.4.38", default-features = false, features = ["serde", "clock"]}
 surge-ping = { version = "0.8", git = "https://github.com/mokeyish/surge-ping.git", rev = "4a88f6f"}

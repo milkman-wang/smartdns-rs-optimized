@@ -54,7 +54,9 @@ pub async fn add(name: &str, ip: IpAddr, timeout: u32) -> io::Result<()> {
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
-        let fd = tokio::io::unix::AsyncFd::new(unsafe { OwnedFd::from_raw_fd(raw) })?;
+        // SAFETY: `raw` is a socket just opened here, and the AsyncFd owns it as
+        // an OwnedFd, so the descriptor stays open and unchanged while registered.
+        let fd = unsafe { tokio::io::unix::AsyncFd::register(OwnedFd::from_raw_fd(raw)) }?;
         let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         address.nl_family = libc::AF_NETLINK as u16;
         let sent = unsafe {
