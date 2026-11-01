@@ -200,6 +200,7 @@ impl App {
 
     async fn update_middleware_handler(&self) {
         let cfg = self.cfg.read().await.clone();
+        crate::own_listeners::set(crate::own_listeners::from_binds(cfg.binds()));
         let mut cache = self.cache.write().await;
         let middleware_handler = build_middleware(
             &cfg,

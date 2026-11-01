@@ -40,6 +40,7 @@ mod error;
 mod infra;
 mod libdns;
 mod log;
+mod own_listeners;
 mod plugins;
 mod preset_ns;
 mod proxy;
@@ -281,6 +282,7 @@ impl RuntimeConfig {
             builder = builder.with_client_subnet(subnet);
         }
         builder = builder.with_proxies(proxies);
+        builder = builder.with_own_listeners(own_listeners::from_binds(self.binds()));
         builder.build().await
     }
 }

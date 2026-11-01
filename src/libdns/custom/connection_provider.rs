@@ -155,13 +155,17 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
             let ip_addrs: StackVec<(_, StackVec<_>)> = match (server.host(), server.proto()) {
                 (_, ProtocolConfig::System) => {
                     let (resolv_conf, _) = crate::libdns::resolver::system_conf::read_system_conf()?;
-                    if resolv_conf.name_servers.is_empty() {
+                    let (urls, _) = crate::own_listeners::without_own(
+                        &crate::own_listeners::get(),
+                        resolv_conf.name_servers.iter().map(DnsUrl::from),
+                    );
+                    if urls.is_empty() {
                         return Err(ProtoErrorKind::NoConnections.into());
                     }
-                    resolv_conf.name_servers.iter().map(|conf| {
-                        let mut url = DnsUrl::from(conf);
+                    urls.into_iter().filter_map(|mut url| {
+                        let ip = url.ip()?;
                         *url = (*server).clone(); // params
-                        (Cow::Owned(url), smallvec![conf.ip])
+                        Some((Cow::Owned(url), smallvec![ip]))
                     }).collect()
                 },
                 (_, ProtocolConfig::Dhcp { interface }) => {
@@ -173,14 +177,18 @@ impl crate::libdns::resolver::name_server::ConnectionProvider for ConnectionProv
                         io::Error::other("dhcp discover failed")
                     })?;
 
-                    let nameservers = msg.nameservers();
+                    let (urls, _) = crate::own_listeners::without_own(
+                        &crate::own_listeners::get(),
+                        msg.nameservers().into_iter().map(DnsUrl::from),
+                    );
 
-                    if nameservers.is_empty() {
+                    if urls.is_empty() {
                         return Err(ProtoErrorKind::NoConnections.into());
                     }
 
-                    nameservers.into_iter().map(|ip| {
-                        (Cow::Owned(DnsUrl::from(ip)), smallvec![ip])
+                    urls.into_iter().filter_map(|url| {
+                        let ip = url.ip()?;
+                        Some((Cow::Owned(url), smallvec![ip]))
                     }).collect()
                 },
                 (Host::Domain(domain), _) => {

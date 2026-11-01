@@ -46,9 +46,17 @@ pub struct DnsClientBuilder {
     ca_path: Option<PathBuf>,
     proxies: Arc<HashMap<String, ProxyConfig>>,
     client_subnet: Option<ClientSubnet>,
+    own_listeners: Vec<crate::own_listeners::Listener>,
 }
 
 impl DnsClientBuilder {
+    /// The server's own listeners: an upstream that is one of them would send
+    /// every query back to this server, so it is left out.
+    pub fn with_own_listeners(mut self, listeners: Vec<crate::own_listeners::Listener>) -> Self {
+        self.own_listeners = listeners;
+        self
+    }
+
     pub fn add_servers<S: Into<NameServerInfo>>(self, servers: Vec<S>) -> Self {
         servers.into_iter().fold(self, |b, s| b.add_server(s))
     }
@@ -86,9 +94,33 @@ impl DnsClientBuilder {
             ca_path,
             proxies,
             client_subnet,
+            own_listeners,
         } = self;
 
         let tls_client_config = TlsClientConfigBundle::new(ca_path, ca_file);
+
+        // A server that is this server would send each query back to it.
+        let server_infos = {
+            let local_ips = if own_listeners.is_empty() {
+                vec![]
+            } else {
+                crate::own_listeners::local_ips()
+            };
+            server_infos
+                .into_iter()
+                .filter(|info| {
+                    let own =
+                        crate::own_listeners::is_own(&own_listeners, &info.server, &local_ips);
+                    if own {
+                        warn!(
+                            "server {} is this server itself; skipped to avoid a query loop",
+                            info.server
+                        );
+                    }
+                    !own
+                })
+                .collect::<Vec<_>>()
+        };
 
         let mut server_instances = HashMap::<&NameServerInfo, _>::new();
         let mut make_server = |server_config, resolver, dedup| {
@@ -154,7 +186,10 @@ impl DnsClientBuilder {
                 }
             }
 
-            let boot = Arc::new(BootstrapResolver::from_system_conf());
+            let boot = Arc::new(BootstrapResolver::from_system_conf(
+                &own_listeners,
+                &tls_client_config,
+            ));
 
             let resolver: Arc<BootstrapResolver> = if !bootstrap_servers.is_empty() {
                 let servers = bootstrap_servers
@@ -692,26 +727,40 @@ mod bootstrap {
     }
 
     impl BootstrapResolver<NameServerGroup> {
-        pub fn from_system_conf() -> Self {
+        /// The system resolvers that are not one of `own_listeners`. If there
+        /// are none, AliDNS and Cloudflare over HTTPS stand in.
+        pub fn from_system_conf(
+            own_listeners: &[crate::own_listeners::Listener],
+            tls_client_config: &TlsClientConfigBundle,
+        ) -> Self {
+            use crate::preset_ns::{ALIDNS, CLOUDFLARE};
+
+            let presets = || {
+                let name_servers = ALIDNS.https().chain(CLOUDFLARE.https()).collect::<Vec<_>>();
+                ResolverConfig::from_parts(None, vec![], name_servers)
+            };
             let (resolv_config, resolv_opts) =
                 crate::libdns::resolver::system_conf::read_system_conf().unwrap_or_else(|err| {
                     warn!("read system conf failed, {}", err);
-
-                    use crate::preset_ns::{ALIDNS, CLOUDFLARE};
-
-                    let name_servers = ALIDNS.https().chain(CLOUDFLARE.https()).collect::<Vec<_>>();
-
-                    (
-                        ResolverConfig::from_parts(None, vec![], name_servers),
-                        ResolverOpts::default(),
-                    )
+                    (presets(), ResolverOpts::default())
                 });
-            let mut name_servers = vec![];
 
-            for config in resolv_config.name_servers() {
-                if let Ok(ns) = NameServer::new(DnsUrl::from(config).into(), None, None, None, None)
-                {
-                    name_servers.push(Arc::new(ns));
+            // On OpenWrt the system resolver is usually this server itself.
+            let (mut urls, skipped) = crate::own_listeners::without_own(
+                own_listeners,
+                resolv_config.name_servers().iter().map(DnsUrl::from),
+            );
+            if urls.is_empty() && skipped > 0 {
+                warn!("the system resolver is this server; using AliDNS and Cloudflare instead");
+                urls = presets().name_servers().iter().map(DnsUrl::from).collect();
+            }
+
+            let mut name_servers = vec![];
+            for url in urls {
+                let tls = Some(tls_client_config.clone());
+                match NameServer::new(url.into(), None, tls, None, None) {
+                    Ok(ns) => name_servers.push(Arc::new(ns)),
+                    Err(err) => warn!("failed to create system nameserver: {err}"),
                 }
             }
 
@@ -1162,6 +1211,23 @@ mod tests {
                 .any(|i| i == "223.5.5.5".parse::<IpAddr>().unwrap()
                     || i == "223.6.6.6".parse::<IpAddr>().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn test_own_listener_is_not_an_upstream() {
+        use crate::own_listeners::{Listener, Transport};
+
+        let client = DnsClient::builder()
+            .add_server(DnsUrl::from_str("udp://127.0.0.1:53").unwrap())
+            .add_server(DnsUrl::from_str("udp://127.0.0.1:5399").unwrap())
+            .with_own_listeners(vec![Listener {
+                transport: Transport::Plain,
+                addr: "[::]:53".parse().unwrap(),
+            }])
+            .build()
+            .await;
+        let default = client.get_server_group("default").await.unwrap();
+        assert_eq!(default.len(), 1);
     }
 
     async fn query_google(client: &DnsClient) -> bool {
