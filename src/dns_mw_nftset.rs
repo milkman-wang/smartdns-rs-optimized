@@ -1,6 +1,7 @@
 use crate::config::{ConfigForIP, KernelIpSet, NFTsetConfig};
 use crate::dns::*;
 use crate::middleware::*;
+use std::borrow::Borrow;
 use std::net::IpAddr;
 
 pub struct DnsNftsetMiddleware;
@@ -82,7 +83,7 @@ fn select_sets<T: crate::config::parser::NomParser>(
     vec![]
 }
 
-fn updates(ctx: &DnsContext, response: &DnsResponse) -> Vec<SetUpdate> {
+fn updates(ctx: &DnsContext, query_name: &Name, response: &DnsResponse) -> Vec<SetUpdate> {
     if ctx.server_opts.is_background || ctx.server_opts.no_rule_ipset() {
         return vec![];
     }
@@ -117,9 +118,14 @@ fn updates(ctx: &DnsContext, response: &DnsResponse) -> Vec<SetUpdate> {
                 .or_else(|| default.and_then(|g| g.nftset_no_speed.as_deref()))
         })
         .flatten();
-    let defaults = ctx
-        .cfg()
-        .find_domain_rule(response.query().name(), "default");
+    // Without a client rule group, the context already holds the default
+    // group's rule for the queried name.
+    let defaults = match ctx.server_opts.rule_group.as_deref() {
+        None | Some("" | "default") if response.query().name() == query_name => None,
+        _ => ctx
+            .cfg()
+            .find_domain_rule(response.query().name(), "default"),
+    };
     let mut updates = vec![];
     for record in response.records() {
         let Some(ip) = record.data().ip_addr() else {
@@ -163,7 +169,7 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for DnsNftsetMidd
         next: Next<'_, DnsContext, DnsRequest, DnsResponse, DnsError>,
     ) -> Result<DnsResponse, DnsError> {
         let response = next.run(ctx, req).await?;
-        let updates = updates(ctx, &response);
+        let updates = updates(ctx, req.query().name().borrow(), &response);
         if !updates.is_empty() {
             let debug = ctx.cfg().nftset_debug;
             // Clients can connect as soon as they receive the answer. Install
@@ -385,7 +391,7 @@ mod tests {
             )],
         )
         .with_probe_result(ProbeResult::Failed);
-        let result = updates(&ctx, &response);
+        let result = updates(&ctx, response.query().name(), &response);
         assert_eq!(
             result[0],
             SetUpdate::IpSet(KernelIpSet("route4".into()), ip, 90)
@@ -405,11 +411,12 @@ mod tests {
         ctx.domain_rule = None;
         response.queries_mut()[0].set_name("unmatched.example.".parse().unwrap());
         assert!(
-            matches!(&updates(&ctx, &response)[0], SetUpdate::NftSet(set, _, 90) if set.name == "failed4")
+            matches!(&updates(&ctx, response.query().name(), &response)[0], SetUpdate::NftSet(set, _, 90) if set.name == "failed4")
         );
         assert!(
             updates(
                 &ctx,
+                response.query().name(),
                 &response.clone().with_probe_result(ProbeResult::Unchecked)
             )
             .is_empty()
@@ -417,6 +424,7 @@ mod tests {
         assert!(
             updates(
                 &ctx,
+                response.query().name(),
                 &response
                     .clone()
                     .with_probe_result(ProbeResult::Measured(std::time::Duration::from_millis(1)))
@@ -424,7 +432,7 @@ mod tests {
             .is_empty()
         );
         ctx.server_opts.no_rule_ipset = Some(true);
-        assert!(updates(&ctx, &response).is_empty());
+        assert!(updates(&ctx, response.query().name(), &response).is_empty());
     }
 
     #[test]
@@ -463,7 +471,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            let updates = updates(&ctx, &response);
+            let updates = updates(&ctx, response.query().name(), &response);
             assert!(matches!(&updates[0], SetUpdate::NftSet(set, _, _) if set.name == expected4));
             assert!(matches!(&updates[1], SetUpdate::NftSet(set, _, _) if set.name == "global6"));
         }

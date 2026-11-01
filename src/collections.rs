@@ -1,10 +1,112 @@
-use std::{collections::HashMap, ops::Deref};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasherDefault, DefaultHasher, Hasher},
+};
 
-use crate::{config::WildcardName, libdns::proto::rr::Name, third_ext::HashCode};
+use crate::{
+    config::{Wildcard, WildcardName},
+    libdns::proto::rr::Name,
+};
+
+/// What part of the name space a key matches, as in [`WildcardName`].
+const FULL: u8 = 0;
+const DEFAULT: u8 = 1;
+const SUFFIX: u8 = 2;
+const SUB: u8 = 3;
+
+/// The maps' keys are already hashes, so they are used as they are.
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl Hasher for KeyHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Only u64 keys are hashed; keep anything else well defined.
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, key: u64) {
+        self.0 = key;
+    }
+}
+
+type KeyMap<V> = HashMap<u64, V, BuildHasherDefault<KeyHasher>>;
+
+/// A name in lowercase wire format without the root label. Each parent's
+/// wire format is a suffix of it, so the parents are looked up without
+/// building their names.
+struct WireName {
+    bytes: [u8; 255],
+    len: usize,
+    starts: [u8; 128],
+    labels: usize,
+}
+
+impl WireName {
+    fn new<'a>(labels: impl Iterator<Item = &'a [u8]>) -> Option<Self> {
+        let mut name = Self {
+            bytes: [0; 255],
+            len: 0,
+            starts: [0; 128],
+            labels: 0,
+        };
+        for label in labels {
+            let end = name.len + 1 + label.len();
+            if end > name.bytes.len() || name.labels == name.starts.len() || label.len() > 63 {
+                return None;
+            }
+            name.starts[name.labels] = name.len as u8;
+            name.bytes[name.len] = label.len() as u8;
+            let dst = &mut name.bytes[name.len + 1..end];
+            dst.copy_from_slice(label);
+            dst.make_ascii_lowercase();
+            name.len = end;
+            name.labels += 1;
+        }
+        Some(name)
+    }
+
+    /// The wire format of the name without its first `level` labels; past
+    /// the last label, the root's.
+    #[inline]
+    fn parent(&self, level: usize) -> &[u8] {
+        match self.starts[..self.labels].get(level) {
+            Some(&start) => &self.bytes[start as usize..self.len],
+            None => &[],
+        }
+    }
+}
+
+#[inline]
+fn key(kind: u8, wire: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write_u8(kind);
+    hasher.write(wire);
+    hasher.finish()
+}
+
+fn kind(name: &WildcardName) -> u8 {
+    match name {
+        WildcardName::Default(_) => DEFAULT,
+        WildcardName::Suffix(_) => SUFFIX,
+        WildcardName::Sub(_, _) => SUB,
+        WildcardName::Full(_) => FULL,
+    }
+}
 
 pub struct DomainMap<T> {
-    map: HashMap<u64, T>,
-    wildcards: HashMap<u64, Vec<WildcardName>>, // hash => wildcard names
+    /// Default, suffix and full names, by kind and name.
+    map: KeyMap<T>,
+    /// `*` names, by the name they are one level below.
+    subs: KeyMap<Vec<(Wildcard, T)>>,
 }
 
 impl<T> DomainMap<T> {
@@ -13,71 +115,35 @@ impl<T> DomainMap<T> {
         Self::default()
     }
 
+    /// The value of the most specific name that matches `name`: its full
+    /// or default name, then for each parent, from the nearest, its `*`
+    /// names (first parent only), suffix and default names. Names compare
+    /// without case and trailing dot.
     pub fn find(&self, name: &Name) -> Option<&T> {
-        if self.map.is_empty() {
+        if self.is_empty() {
             return None;
         }
-        let mut name = if name.is_wildcard() {
-            name.base_name()
-        } else {
-            name.to_owned()
-        };
+        // A wildcard query name is matched as its parent.
+        let skip = usize::from(name.is_wildcard());
+        let wire = WireName::new(name.iter().skip(skip))?;
+        let get = |kind, level| self.map.get(&key(kind, wire.parent(level)));
 
-        let mut lvl = 0;
-        let mut last = name.clone();
-        loop {
-            {
-                if lvl == 0 {
-                    let wildcard_name = WildcardName::Full(name);
-                    if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
-                        return Some(v);
-                    }
-                    name = wildcard_name.into();
-                }
-
-                if lvl == 1 {
-                    let w = name.hash_code();
-                    if let Some(wildcards) = self.wildcards.get(&w) {
-                        for w in wildcards.iter() {
-                            if w.is_match(&last)
-                                && let Some(v) = self.map.get(&w.hash_code())
-                            {
-                                return Some(v);
-                            }
-                        }
-                    }
-                }
-
-                if lvl >= 1 {
-                    let wildcard_name = WildcardName::Suffix(name);
-                    if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
-                        return Some(v);
-                    }
-                    name = wildcard_name.into();
-                }
-
-                let wildcard_name = WildcardName::Default(name);
-                if let Some(v) = self.map.get(&wildcard_name.hash_code()) {
-                    return Some(v);
-                }
-                name = wildcard_name.into();
-            }
-
-            if !name.is_fqdn() {
-                name.set_fqdn(true);
-                continue;
-            }
-
-            if name.is_root() {
-                break;
-            }
-
-            last = name;
-
-            name = last.base_name();
-            lvl += 1;
+        if let Some(value) = get(FULL, 0).or_else(|| get(DEFAULT, 0)) {
+            return Some(value);
         }
-
+        for level in 1..=wire.labels {
+            if level == 1
+                && !self.subs.is_empty()
+                && let Some(subs) = self.subs.get(&key(SUB, wire.parent(1)))
+                && let Some(first) = name.iter().nth(skip)
+                && let Some((_, value)) = subs.iter().find(|(w, _)| w.is_match(first))
+            {
+                return Some(value);
+            }
+            if let Some(value) = get(SUFFIX, level).or_else(|| get(DEFAULT, level)) {
+                return Some(value);
+            }
+        }
         None
     }
 
@@ -88,38 +154,49 @@ impl<T> DomainMap<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.map.len() + self.subs.values().map(Vec::len).sum::<usize>()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.map.is_empty() && self.subs.is_empty()
     }
 
-    #[inline]
+    /// Inserts a value, replacing and returning the one for the same name.
+    /// A name longer than DNS allows is not inserted.
     pub fn insert(&mut self, name: impl Into<WildcardName>, value: T) -> Option<T> {
-        let mut name: WildcardName = name.into();
-        name.set_fqdn(true);
-        let k = name.hash_code();
-        if name.is_sub() {
-            self.wildcards
-                .entry(name.deref().hash_code())
-                .or_default()
-                .push(name);
+        let name: WildcardName = name.into();
+        let wire = WireName::new(name.iter())?;
+        match name {
+            WildcardName::Sub(wildcard, _) => {
+                let subs = self.subs.entry(key(SUB, wire.parent(0))).or_default();
+                match subs.iter_mut().find(|(w, _)| *w == wildcard) {
+                    Some((_, old)) => Some(std::mem::replace(old, value)),
+                    None => {
+                        subs.push((wildcard, value));
+                        None
+                    }
+                }
+            }
+            name => self.map.insert(key(kind(&name), wire.parent(0)), value),
         }
-
-        self.map.insert(k, value)
     }
 
-    #[inline]
     pub fn remove(&mut self, name: &WildcardName) -> Option<T> {
-        if name.is_sub() {
-            self.wildcards
-                .entry(name.deref().hash_code())
-                .or_default()
-                .retain(|n| n != name);
+        let wire = WireName::new(name.iter())?;
+        match name {
+            WildcardName::Sub(wildcard, _) => {
+                let k = key(SUB, wire.parent(0));
+                let subs = self.subs.get_mut(&k)?;
+                let index = subs.iter().position(|(w, _)| w == wildcard)?;
+                let (_, value) = subs.remove(index);
+                if subs.is_empty() {
+                    self.subs.remove(&k);
+                }
+                Some(value)
+            }
+            _ => self.map.remove(&key(kind(name), wire.parent(0))),
         }
-        self.map.remove(&name.hash_code())
     }
 }
 
@@ -128,26 +205,18 @@ impl<T> Default for DomainMap<T> {
     fn default() -> Self {
         Self {
             map: Default::default(),
-            wildcards: Default::default(),
+            subs: Default::default(),
         }
     }
 }
 
 impl<T> FromIterator<(WildcardName, T)> for DomainMap<T> {
     fn from_iter<I: IntoIterator<Item = (WildcardName, T)>>(iter: I) -> Self {
-        let mut map: HashMap<u64, T> = Default::default();
-        let mut wildcards: HashMap<u64, Vec<WildcardName>> = Default::default();
-        for (n, v) in iter.into_iter() {
-            let k = n.hash_code();
-
-            if n.is_sub() {
-                wildcards.entry(n.deref().hash_code()).or_default().push(n);
-            }
-
-            map.insert(k, v);
+        let mut map = Self::default();
+        for (name, value) in iter {
+            map.insert(name, value);
         }
-
-        Self { map, wildcards }
+        map
     }
 }
 
@@ -500,6 +569,30 @@ mod tests {
         assert!(!set.contains(&"example.com".parse().unwrap()));
         assert!(!set.contains(&"www.example.com".parse().unwrap()));
         assert!(!set.contains(&"a.www.example.com".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_find_ignores_case_and_trailing_dot() {
+        let mut map = DomainMap::new();
+        map.insert(WildcardName::Default("Example.COM".parse().unwrap()), 1);
+
+        assert_eq!(map.find(&"www.example.com.".parse().unwrap()), Some(&1));
+        assert_eq!(map.find(&"EXAMPLE.com".parse().unwrap()), Some(&1));
+        assert_eq!(map.find(&"example.org".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn test_find_root_and_wildcard_queries() {
+        let mut map = DomainMap::new();
+        map.insert(WildcardName::Default(Name::root()), 0);
+        map.insert(WildcardName::Default("example.com".parse().unwrap()), 1);
+
+        assert_eq!(map.find(&Name::root()), Some(&0));
+        assert_eq!(map.find(&"example.org".parse().unwrap()), Some(&0));
+        assert_eq!(map.find(&"a.b.example.com".parse().unwrap()), Some(&1));
+        // A wildcard query name is matched as its parent.
+        assert_eq!(map.find(&"*.com".parse().unwrap()), Some(&0));
+        assert_eq!(map.find(&"*.example.com".parse().unwrap()), Some(&1));
     }
 
     #[test]
