@@ -110,7 +110,8 @@ domain-rules /./ -nameserver remote -recheck-nameserver local -recheck-ip-set lo
 
 - Only A and AAAA lookups are rechecked. A rechecked answer is cached as usual, and prefetch rechecks it again.
 - Only the rule that chose the group counts: a name whose own rule sets `-nameserver` (a domestic or a blocked list, for example) does not inherit a parent's recheck, and a listener bound with `-group` does not recheck. So only names whose answers are local addresses reach the local resolver.
-- The two options can go on a line of their own; they merge into the existing rule for the same name. With Passwall's default DNS set to remote, for example, add `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` after its generated configuration.
+- The second answer is speed-checked by the global `speed-check-mode` and `response-mode`, not by the rule's own: Passwall turns the speed check off for answers that go through the proxy, while addresses in the ip-set are reached directly. SmartDNS-rs checks nothing when `speed-check-mode` is not set, so set it if you want this, for example to the C SmartDNS default `speed-check-mode ping,tcp:80,tcp:443`.
+- The two options can go on a line of their own; they merge into the existing rule for the same name. With Passwall's default DNS set to remote, for example, add `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` after its generated configuration. A `-subnet` with your public network on the same line makes the remote resolver answer for your region, so local sites outside the lists more often get local addresses and are rechecked.
 - Only names that trigger a recheck take a second query, and only on a cache miss; rules without a recheck are unaffected.
 
 For supported directives, examples and differences from C SmartDNS, see the [compatibility guide](../docs/C_FEATURE_COMPATIBILITY.md).

@@ -204,7 +204,23 @@ impl Middleware<DnsContext, DnsRequest, DnsResponse, DnsError> for NameServerMid
             let res = lookup_ip(name_server.deref(), name.clone(), &opts).await;
 
             match recheck {
-                Some(recheck) => recheck.lookup(client, cfg, name, &opts, res).await,
+                Some(recheck) => {
+                    // The rule's speed check suits its own group: Passwall turns
+                    // it off for answers that go through the proxy. Addresses
+                    // the recheck group gives are in the ip-set and reached
+                    // directly, so they are checked as for a name without rules.
+                    let recheck_opts = LookupIpOptions {
+                        response_strategy: if ctx.server_opts.is_background {
+                            ResponseMode::FastestIp
+                        } else {
+                            cfg.response_mode()
+                        },
+                        speed_check_mode: cfg.speed_check_mode(),
+                        lookup_options: opts.lookup_options.clone(),
+                        ..opts
+                    };
+                    recheck.lookup(client, cfg, name, &recheck_opts, res).await
+                }
                 None => (res, None),
             }
         };
@@ -1686,8 +1702,8 @@ mod tests {
             });
     }
 
-    /// A UDP upstream that answers A queries from a fixed table and counts
-    /// them.
+    /// A UDP upstream that answers A queries from a fixed table, one record
+    /// per row of the name, and counts them.
     async fn table_upstream(
         table: &[(&str, &str)],
     ) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
@@ -1717,13 +1733,16 @@ mod tests {
                     && query.query_type() == RecordType::A
                 {
                     let asked = query.name().to_string();
+                    let mut rows = table
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case(&asked))
+                        .peekable();
                     // Only names in the table count: the client also warms
                     // up its connections with a query of its own.
-                    if let Some((_, ip)) = table
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case(&asked))
-                    {
+                    if rows.peek().is_some() {
                         count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    for (_, ip) in rows {
                         response.add_answer(Record::from_rdata(
                             query.name().clone(),
                             600,
@@ -1860,6 +1879,55 @@ mod tests {
             vec!["104.16.0.1".parse::<IpAddr>().unwrap()]
         );
         assert_eq!(harness.china.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_recheck_answer_is_speed_checked_as_without_rules() {
+        use crate::dns_mw::DnsMiddlewareBuilder;
+        use crate::dns_mw_cache::DnsCacheMiddleware;
+        use crate::server::DnsHandle;
+        use std::sync::atomic::Ordering;
+
+        // Only 127.0.0.1 accepts the probe; 127.0.0.2 refuses it.
+        let probe_target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe_target.local_addr().unwrap().port();
+        let (remote_addr, _) = table_upstream(&[("cn.example.", "127.0.0.9")]).await;
+        let (china_addr, china) =
+            table_upstream(&[("cn.example.", "127.0.0.2"), ("cn.example.", "127.0.0.1")]).await;
+        let directives = [
+            "prefetch-domain no".to_string(),
+            "cache-persist no".to_string(),
+            "response-mode fastest-ip".to_string(),
+            format!("speed-check-mode tcp:{port}"),
+            format!("server {remote_addr} -group remote -exclude-default-group"),
+            format!("server {china_addr} -group china -exclude-default-group"),
+            format!(
+                "ip-set -name loopback -file {}/tests/test_data/loopback-ipv4.txt",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            // As Passwall writes it for answers that go through the proxy.
+            "domain-rules /./ -nameserver remote -speed-check-mode none".to_string(),
+            "domain-rules /./ -recheck-nameserver china -recheck-ip-set loopback".to_string(),
+        ];
+        let cfg = directives
+            .iter()
+            .fold(RuntimeConfig::builder(), |builder, directive| {
+                builder.with(directive)
+            })
+            .build()
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let (_background, background_handle) = DnsHandle::mock();
+        let handler = DnsMiddlewareBuilder::new()
+            .with(DnsCacheMiddleware::new(&cfg, background_handle))
+            .with(NameServerMiddleware::new(cfg.create_dns_client().await))
+            .build(cfg);
+
+        assert_eq!(
+            lookup_a(&handler, "cn.example.").await,
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(china.load(Ordering::SeqCst), 1);
     }
 
     #[test]

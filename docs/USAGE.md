@@ -107,7 +107,8 @@ domain-rules /./ -nameserver remote -recheck-nameserver china -recheck-ip-set ch
 
 - 只对 A/AAAA 查询生效。重查后的结果照常缓存，预取刷新时同样会重查。
 - 只看选出分组的那条规则：自己写了 `-nameserver` 的域名（例如国内名单、GFW 名单）不继承上级的重查；监听时用 `-group` 指定了分组的端口也不重查。因此只有回答是国内地址的域名才会发给国内 DNS。
-- 两个选项可以单独写一行，合并到已有的同名规则上。例如 Passwall 的默认 DNS 选远程时，在它生成的配置之后加一行 `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` 即可。
+- 第二次查询的回答按全局的 `speed-check-mode` 和 `response-mode` 测速选址，不用这条规则自己的测速设置：Passwall 为走代理的回答关掉了测速，而 ip-set 里的地址是直连的。SmartDNS-rs 没写 `speed-check-mode` 时不测速，需要时写上，例如 C 版的默认值 `speed-check-mode ping,tcp:80,tcp:443`。
+- 两个选项可以单独写一行，合并到已有的同名规则上。例如 Passwall 的默认 DNS 选远程时，在它生成的配置之后加一行 `domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute` 即可。同一行还可以加 `-subnet`（填你所在地区的公网网段），远程 DNS 按这个地区回答，名单之外的国内网站更容易拿到国内地址并触发重查。
 - 只有触发重查的域名在未命中缓存时多查一次；没有配置重查的规则不受影响。
 
 
