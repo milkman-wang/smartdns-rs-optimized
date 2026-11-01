@@ -5,6 +5,8 @@ use super::*;
 impl NomParser for Pattern {
     fn parse(input: &str) -> IResult<&str, Self> {
         let delimited_path = delimited(char('"'), is_not("\""), char('"'));
+        // luci-app-smartdns writes file paths in single quotes.
+        let single_quoted_path = delimited(char('\''), is_not("'"), char('\''));
         let unix_path = recognize((
             opt(char('/')),
             separated_list1(char('/'), escaped(is_not("\n \t\\"), '\\', one_of(r#" \"#))),
@@ -16,7 +18,7 @@ impl NomParser for Pattern {
             opt(char('\\')),
         ));
         map_res(
-            alt((delimited_path, unix_path, windows_path)),
+            alt((delimited_path, single_quoted_path, unix_path, windows_path)),
             FromStr::from_str,
         )
         .parse(input)
@@ -54,6 +56,10 @@ mod tests {
         assert_eq!(
             Pattern::parse("**/*.rs"),
             Ok(("", "**/*.rs".parse().unwrap()))
+        );
+        assert_eq!(
+            Pattern::parse("'/tmp/etc/smartdns/passwall*.conf'"),
+            Ok(("", "/tmp/etc/smartdns/passwall*.conf".parse().unwrap()))
         );
     }
 }

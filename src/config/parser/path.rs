@@ -3,6 +3,8 @@ use super::*;
 impl NomParser for PathBuf {
     fn parse(input: &str) -> IResult<&str, Self> {
         let delimited_path = delimited(char('"'), is_not("\""), char('"'));
+        // luci-app-smartdns writes file paths in single quotes.
+        let single_quoted_path = delimited(char('\''), is_not("'"), char('\''));
         let unix_path = recognize((
             opt(char('/')),
             separated_list1(char('/'), escaped(is_not("\n \t\\"), '\\', one_of(r#" \"#))),
@@ -13,7 +15,11 @@ impl NomParser for PathBuf {
             separated_list1(char('\\'), is_not("\\")),
             opt(char('\\')),
         ));
-        map(alt((delimited_path, unix_path, windows_path)), Into::into).parse(input)
+        map(
+            alt((delimited_path, single_quoted_path, unix_path, windows_path)),
+            Into::into,
+        )
+        .parse(input)
     }
 }
 
@@ -41,6 +47,11 @@ mod tests {
     #[test]
     fn test_delimited_path_parse() {
         assert_eq!(PathBuf::parse(r#""a/ b/c""#), Ok(("", "a/ b/c".into())));
+        assert_eq!(PathBuf::parse("'a/ b/c'"), Ok(("", "a/ b/c".into())));
+        assert_eq!(
+            PathBuf::parse("'/etc/smartdns/domain-set/antiad.txt' -x"),
+            Ok((" -x", "/etc/smartdns/domain-set/antiad.txt".into()))
+        );
     }
 
     #[test]

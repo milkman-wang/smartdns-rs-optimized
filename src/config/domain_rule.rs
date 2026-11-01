@@ -102,6 +102,18 @@ impl std::ops::AddAssign for DomainRule {
         if rhs.address.is_some() {
             self.address = rhs.address;
         }
+        if rhs.cname.is_some() {
+            self.cname = rhs.cname;
+        }
+        if rhs.srv.is_some() {
+            self.srv = rhs.srv;
+        }
+        if rhs.https.is_some() {
+            self.https = rhs.https;
+        }
+        if rhs.subnet.is_some() {
+            self.subnet = rhs.subnet;
+        }
 
         if rhs.speed_check_mode.is_some() {
             self.speed_check_mode = rhs.speed_check_mode;
@@ -160,5 +172,28 @@ mod tests {
         assert_eq!(rule.nameserver.as_deref(), Some("remote"));
         assert_eq!(rule.recheck_nameserver.as_deref(), Some("china"));
         assert_eq!(rule.recheck_ip_set.as_deref(), Some("cn"));
+    }
+
+    #[test]
+    fn test_subnet_and_cname_survive_merges() {
+        // Rules are built by merging each line into an empty rule, so an
+        // option the merge skips is lost even on a single line.
+        let subnet: ClientSubnet = "27.42.97.0/24".parse().unwrap();
+        let cname = CNameRule::Value("cdn.example.net.".parse().unwrap());
+        let mut rule = DomainRule::default();
+        rule += DomainRule {
+            nameserver: Some("remote".to_string()),
+            subnet: Some(subnet),
+            cname: Some(cname.clone()),
+            ..Default::default()
+        };
+        rule += DomainRule {
+            recheck_nameserver: Some("china".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(rule.subnet, Some(subnet));
+        assert_eq!(rule.cname, Some(cname));
+        assert_eq!(rule.nameserver.as_deref(), Some("remote"));
     }
 }

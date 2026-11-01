@@ -1535,6 +1535,24 @@ mod tests {
     }
 
     #[test]
+    fn test_config_domain_rule_subnet_from_a_second_line() {
+        // Passwall writes the root rule; custom.conf adds options to it.
+        let cfg = RuntimeConfig::builder()
+            .with("server 127.0.0.1:15356 -group passwall_proxy -exclude-default-group")
+            .with("domain-rules /./ -nameserver passwall_proxy -speed-check-mode none -d no -no-serve-expired -address -6")
+            .with("domain-rules /./ -recheck-nameserver China -recheck-ip-set chnroute -subnet 27.42.97.0/24")
+            .build()
+            .unwrap();
+
+        let rule = cfg
+            .find_domain_rule(&"www.feishu.cn".parse().unwrap(), DEFAULT_GROUP)
+            .unwrap();
+        assert_eq!(rule.nameserver.as_deref(), Some("passwall_proxy"));
+        assert_eq!(rule.recheck_nameserver.as_deref(), Some("China"));
+        assert_eq!(rule.subnet, Some("27.42.97.0/24".parse().unwrap()));
+    }
+
+    #[test]
     fn test_config_server_with_mark_1() {
         let cfg = RuntimeConfig::builder()
             .with("server-https https://223.5.5.5/dns-query -set-mark 255")

@@ -208,6 +208,21 @@ mod tests {
                 })
             ))
         );
+
+        // As luci-app-smartdns writes it.
+        assert_eq!(
+            DomainSetProvider::parse(
+                "-name domain-block-file -file '/etc/smartdns/domain-set/antiad.txt'"
+            ),
+            Ok((
+                "",
+                DomainSetProvider::File(DomainSetFileProvider {
+                    name: "domain-block-file".to_string(),
+                    file: PathBuf::from("/etc/smartdns/domain-set/antiad.txt"),
+                    content_type: Default::default(),
+                })
+            ))
+        );
     }
 
     #[test]
