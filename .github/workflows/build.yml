@@ -110,7 +110,7 @@ jobs:
       BUILD_VARIANT: ${{ inputs.variant }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.version }}
 
@@ -150,7 +150,7 @@ jobs:
           fallback_sha: ${{ github.sha }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: smartdns-${{ inputs.variant }}-${{ matrix.target }}-${{ steps.release_label.outputs.value }}
           retention-days: 30
@@ -162,7 +162,7 @@ jobs:
             dist/*sha256sum.txt
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2.3.2
+        uses: softprops/action-gh-release@v3
         if: ${{ startsWith(inputs.version, 'v') }}
         with:
           draft: false

@@ -27,7 +27,7 @@ jobs:
       version: ${{ steps.package.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install static analysis tools
         run: sudo apt-get update && sudo apt-get install -y gettext shellcheck lua5.1
@@ -115,7 +115,7 @@ jobs:
           - x86_64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -156,7 +156,7 @@ jobs:
 
       - name: Upload packages and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: openwrt-${{ inputs.variant }}-apk-${{ matrix.arch }}-${{ github.sha }}
           path: |
@@ -188,7 +188,7 @@ jobs:
           - x86_64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload packages and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: openwrt-${{ inputs.variant }}-ipk-${{ matrix.arch }}-${{ github.sha }}
           path: |
@@ -259,10 +259,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download architecture artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: openwrt-${{ inputs.variant }}-*-${{ github.sha }}
           path: artifacts

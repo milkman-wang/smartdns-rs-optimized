@@ -68,7 +68,9 @@ runs:
 
     - name: Install just
       if: ${{ inputs.install_just == 'true' }}
-      uses: extractions/setup-just@v3
+      uses: taiki-e/install-action@v2
+      with:
+        tool: just
 
     - name: Install cross
       if: ${{ inputs.install_cross == 'true' && runner.os == 'Linux' }}

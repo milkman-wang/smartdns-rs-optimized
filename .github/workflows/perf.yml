@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup
         uses: ./.github/actions/setup
@@ -64,7 +64,7 @@ jobs:
 
       - name: Publish summary to PR comment
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
@@ -118,7 +118,7 @@ jobs:
             }
 
       - name: Upload perf artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: perf-results
           path: artifacts/perf/
