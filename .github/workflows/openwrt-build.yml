@@ -98,8 +98,9 @@ jobs:
     needs: contract
     runs-on: ubuntu-latest
     # Snapshot SDKs build rust/host from source on a cold runner. Slower 32-bit
-    # targets can exceed two hours before compiling SmartDNS-rs itself.
-    timeout-minutes: 240
+    # targets can exceed two hours before compiling SmartDNS-rs itself, and the
+    # SDK download from the OpenWrt mirror has taken from 15 minutes to 3.6 hours.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -172,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     # The 24.10 package feed currently builds Rust from source. Keep the same
     # allowance as the snapshot matrix for slower 32-bit targets.
-    timeout-minutes: 240
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
