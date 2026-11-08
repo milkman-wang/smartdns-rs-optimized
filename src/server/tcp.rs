@@ -120,7 +120,7 @@ mod tests {
     /// Echo handler: the first byte of each request is how long (in 100ms) to wait
     /// before answering, the second byte identifies the request.
     fn spawn_echo_handler() -> DnsHandle {
-        let (mut rx, handle) = DnsHandle::new();
+        let (mut rx, handle) = DnsHandle::mock();
         tokio::spawn(async move {
             while let Some((message, _, tx)) = rx.recv().await {
                 tokio::spawn(async move {
