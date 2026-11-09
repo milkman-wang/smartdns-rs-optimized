@@ -3,7 +3,8 @@ description: >-
   Build OpenWrt packages in ghcr.io/openwrt/sdk, caching the SDK archive and
   the compiled rust/host toolchain. Reads the same environment as
   openwrt/gh-action-sdk (ARCH, PACKAGES, BUILD_LOG, V, NO_REFRESH_CHECK,
-  NO_SHFMT_CHECK, IGNORE_ERRORS) and leaves bin/ and logs/ in the workspace.
+  NO_SHFMT_CHECK, IGNORE_ERRORS), plus DISABLE_PACKAGES to keep packages
+  out of .config, and leaves bin/ and logs/ in the workspace.
 
 inputs:
   upstream-urls:

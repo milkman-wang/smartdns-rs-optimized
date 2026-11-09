@@ -85,6 +85,24 @@ prepare() {
 		fi
 	done
 
+	# Leave out packages another job builds, such as the other variant of a
+	# multi-variant source; an explicit "is not set" survives defconfig.
+	if [ -n "$DISABLE_PACKAGES" ]; then
+		group "disable $DISABLE_PACKAGES"
+		for pkg in $DISABLE_PACKAGES; do
+			sed -i "/^CONFIG_PACKAGE_$pkg=/d; /^# CONFIG_PACKAGE_$pkg is not set/d" .config
+			echo "# CONFIG_PACKAGE_$pkg is not set" >> .config
+		done
+		make defconfig
+		for pkg in $DISABLE_PACKAGES; do
+			if grep -q "^CONFIG_PACKAGE_$pkg=" .config; then
+				echo "::error::$pkg is still enabled after defconfig (selected by another package)"
+				exit 1
+			fi
+		done
+		endgroup
+	fi
+
 	# Cache identity for rust/host: the SDK toolchain plus everything OpenWrt
 	# hashes into the rust/host stamps (the package files and stamp rules).
 	rm -f .ci-rust-key

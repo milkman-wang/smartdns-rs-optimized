@@ -17,6 +17,7 @@ env:
   VARIANT: ${{ inputs.variant }}
   VARIANT_LABEL: ${{ inputs.variant == 'webui' && 'WebUI' || 'Headless' }}
   CORE_PACKAGE: ${{ inputs.variant == 'webui' && 'smartdns-rs-webui' || 'smartdns-rs' }}
+  OTHER_PACKAGE: ${{ inputs.variant == 'webui' && 'smartdns-rs' || 'smartdns-rs-webui' }}
   SMARTDNS_FEATURES: ${{ inputs.variant == 'webui' && 'openwrt,webui' || 'openwrt' }}
 
 jobs:
@@ -151,7 +152,9 @@ jobs:
           ARCH: ${{ matrix.arch }}
           BUILD_LOG: 1
           NO_REFRESH_CHECK: 1
-          # SDK targets use the source directory; release filtering selects the variant.
+          # SDK targets use the source directory, which builds every enabled
+          # variant; keep the other variant out of .config.
+          DISABLE_PACKAGES: ${{ env.OTHER_PACKAGE }}
           PACKAGES: smartdns-rs luci-app-smartdns-rs luci-app-smartdns-rs-compat
           V: s
 
@@ -232,6 +235,7 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}-24.10.7
           BUILD_LOG: 1
+          DISABLE_PACKAGES: ${{ env.OTHER_PACKAGE }}
           NO_REFRESH_CHECK: 1
           PACKAGES: smartdns-rs luci-app-smartdns-rs luci-app-smartdns-rs-compat
           V: s

@@ -160,6 +160,7 @@ fetch() {
 run() {
 	docker run --rm \
 		--env BUILD_LOG \
+		--env DISABLE_PACKAGES \
 		--env IGNORE_ERRORS \
 		--env NO_REFRESH_CHECK \
 		--env NO_SHFMT_CHECK \
