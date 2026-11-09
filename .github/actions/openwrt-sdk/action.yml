@@ -1,0 +1,85 @@
+name: OpenWrt SDK build
+description: >-
+  Build OpenWrt packages in ghcr.io/openwrt/sdk, caching the SDK archive and
+  the compiled rust/host toolchain. Reads the same environment as
+  openwrt/gh-action-sdk (ARCH, PACKAGES, BUILD_LOG, V, NO_REFRESH_CHECK,
+  NO_SHFMT_CHECK, IGNORE_ERRORS) and leaves bin/ and logs/ in the workspace.
+
+inputs:
+  upstream-urls:
+    description: OpenWrt download hosts, tried in order, for SDKs not bundled in the image
+    default: https://downloads.cdn.openwrt.org https://downloads.openwrt.org https://mirror-03.infra.openwrt.org
+
+runs:
+  using: composite
+  steps:
+    - name: Pull SDK image
+      id: image
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/host.sh" image
+
+    - name: Resolve SDK archive
+      id: resolve
+      if: steps.image.outputs.bundled != 'true'
+      shell: bash
+      env:
+        UPSTREAM_URLS: ${{ inputs.upstream-urls }}
+      run: bash "$GITHUB_ACTION_PATH/host.sh" resolve
+
+    - name: Restore SDK archive
+      if: steps.image.outputs.bundled != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/openwrt-sdk-archive
+        key: openwrt-sdk-archive-${{ steps.image.outputs.arch }}-${{ steps.resolve.outputs.sha256 }}
+
+    - name: Download SDK archive
+      id: fetch
+      if: steps.image.outputs.bundled != 'true'
+      shell: bash
+      env:
+        UPSTREAM_URLS: ${{ inputs.upstream-urls }}
+      run: bash "$GITHUB_ACTION_PATH/host.sh" fetch
+
+    - name: Save SDK archive
+      if: steps.image.outputs.bundled != 'true' && steps.fetch.outputs.downloaded == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/openwrt-sdk-archive
+        key: openwrt-sdk-archive-${{ steps.image.outputs.arch }}-${{ steps.fetch.outputs.sha256 }}
+
+    - name: Prepare feeds and packages
+      id: prepare
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/host.sh" prepare
+
+    - name: Restore rust/host
+      id: rust-cache
+      if: steps.prepare.outputs.rust-key != ''
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/openwrt-rust-host
+        key: openwrt-rust-host-v1-${{ steps.image.outputs.arch }}-${{ steps.prepare.outputs.rust-key }}
+
+    - name: Build rust/host
+      if: steps.prepare.outputs.rust-key != ''
+      shell: bash
+      env:
+        RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+      run: bash "$GITHUB_ACTION_PATH/host.sh" rust
+
+    - name: Save rust/host
+      if: steps.prepare.outputs.rust-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/openwrt-rust-host
+        key: openwrt-rust-host-v1-${{ steps.image.outputs.arch }}-${{ steps.prepare.outputs.rust-key }}
+
+    - name: Build packages
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/host.sh" run packages
+
+    - name: Collect bin and logs
+      if: always()
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/host.sh" finish

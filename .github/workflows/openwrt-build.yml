@@ -97,9 +97,9 @@ jobs:
     name: OpenWrt SDK (${{ matrix.arch }})
     needs: contract
     runs-on: ubuntu-latest
-    # Snapshot SDKs build rust/host from source on a cold runner. Slower 32-bit
-    # targets can exceed two hours before compiling SmartDNS-rs itself, and the
-    # SDK download from the OpenWrt mirror has taken from 15 minutes to 3.6 hours.
+    # With the SDK archive and rust/host cached a job takes well under an hour.
+    # A cold cache rebuilds rust/host from source, which slower 32-bit targets
+    # need up to three hours for, so keep the hosted-runner maximum.
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -146,7 +146,7 @@ jobs:
           sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${GITHUB_RUN_NUMBER}/" contrib/openwrt/luci-app-smartdns-rs-compat/Makefile
 
       - name: Build packages
-        uses: openwrt/gh-action-sdk@v11
+        uses: ./.github/actions/openwrt-sdk
         env:
           ARCH: ${{ matrix.arch }}
           BUILD_LOG: 1
@@ -171,8 +171,8 @@ jobs:
     name: OpenWrt 24.10 IPK (${{ matrix.arch }})
     needs: contract
     runs-on: ubuntu-latest
-    # The 24.10 package feed currently builds Rust from source. Keep the same
-    # allowance as the snapshot matrix for slower 32-bit targets.
+    # The 24.10 feed builds Rust from source when its cache is cold. Keep the
+    # same allowance as the snapshot matrix for slower 32-bit targets.
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -228,7 +228,7 @@ jobs:
             contrib/openwrt/smartdns-rs/Makefile
 
       - name: Build IPK packages
-        uses: openwrt/gh-action-sdk@v11
+        uses: ./.github/actions/openwrt-sdk
         env:
           ARCH: ${{ matrix.arch }}-24.10.7
           BUILD_LOG: 1

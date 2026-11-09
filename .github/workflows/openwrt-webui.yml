@@ -17,6 +17,7 @@ on:
       - 'src/**'
       - 'contrib/openwrt/**'
       - '.github/workflows/openwrt*.yml'
+      - '.github/actions/openwrt-sdk/**'
       - '.github/RELEASE_NOTES.md'
   push:
     branches: [main]
@@ -27,6 +28,7 @@ on:
       - 'src/**'
       - 'contrib/openwrt/**'
       - '.github/workflows/openwrt*.yml'
+      - '.github/actions/openwrt-sdk/**'
       - '.github/RELEASE_NOTES.md'
 
 permissions:
