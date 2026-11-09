@@ -104,7 +104,8 @@ tree_files() {
 
 stamp_times() {
 	{
-		find build_dir/*/host/rustc-* staging_dir/hostpkg/stamp -maxdepth 1 -name '.*' -type f \
+		# OpenWrt (re)writes the *_check files on every dependency check.
+		find build_dir/*/host/rustc-* staging_dir/hostpkg/stamp -maxdepth 1 -name '.*' -not -name '*_check' -type f \
 			-printf '%p %T@\n' 2>/dev/null || true
 	} | LC_ALL=C sort
 }
