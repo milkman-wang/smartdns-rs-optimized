@@ -393,6 +393,11 @@ fn read_lease_file<P: AsRef<Path>>(path: P, zone: Option<&Name>) -> std::io::Res
         }
 
         if let Ok(mut client_info) = ClientInfo::from_str(line) {
+            // dnsmasq writes `*` for a client that sent no hostname. Indexed as a name it
+            // is a wildcard: every unknown name in the zone would resolve to that client.
+            if client_info.host.is_wildcard() {
+                continue;
+            }
             if let Some(z) = zone
                 && let Ok(host) = client_info.host.clone().append_name(z)
             {
@@ -615,6 +620,7 @@ mod tests {
     use super::*;
     use crate::libdns::proto::rr::RecordType;
     use crate::libdns::resolver::IntoName;
+    use std::net::Ipv4Addr;
     use std::str::FromStr;
 
     #[test]
@@ -706,6 +712,28 @@ mod tests {
             store.lookup(&"iphone-abc.xyz.".parse().unwrap(), RecordType::A),
             None
         );
+    }
+
+    #[test]
+    fn test_lease_without_hostname_is_not_a_wildcard() {
+        let store = LanClientStore::new(
+            "tests/test_data/dhcp-no-hostname.leases",
+            Name::from_str("lan").ok(),
+        );
+
+        // The named lease still resolves.
+        assert_eq!(
+            store.lookup(&"andy-pc.lan.".parse().unwrap(), RecordType::A),
+            Some(RData::A(Ipv4Addr::new(192, 168, 100, 16).into()))
+        );
+
+        // The lease whose hostname is `*` must not answer other names.
+        for name in ["wpad.lan.", "wpad", "localhost"] {
+            assert_eq!(store.lookup(&name.parse().unwrap(), RecordType::A), None, "{name}");
+        }
+
+        // Nor is `*` a hostname to return for its address.
+        assert!(store.reverse_lookup(&"192.168.100.163".parse().unwrap()).is_none());
     }
 
     #[test]
