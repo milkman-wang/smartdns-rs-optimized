@@ -729,11 +729,19 @@ mod tests {
 
         // The lease whose hostname is `*` must not answer other names.
         for name in ["wpad.lan.", "wpad", "localhost"] {
-            assert_eq!(store.lookup(&name.parse().unwrap(), RecordType::A), None, "{name}");
+            assert_eq!(
+                store.lookup(&name.parse().unwrap(), RecordType::A),
+                None,
+                "{name}"
+            );
         }
 
         // Nor is `*` a hostname to return for its address.
-        assert!(store.reverse_lookup(&"192.168.100.163".parse().unwrap()).is_none());
+        assert!(
+            store
+                .reverse_lookup(&"192.168.100.163".parse().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
