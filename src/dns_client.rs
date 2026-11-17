@@ -1067,6 +1067,100 @@ mod tests {
         }
     }
 
+    /// A TCP upstream that closes connections must not fail the query that would reuse the
+    /// closed connection: it is retried once on a new connection.
+    #[tokio::test]
+    async fn test_tcp_upstream_retries_on_closed_connection() {
+        use crate::{config::NameServerInfo, libdns::proto::rr::RData};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_query(stream: &mut tokio::net::TcpStream) -> Option<Message> {
+            let len = stream.read_u16().await.ok()?;
+            let mut bytes = vec![0; len as usize];
+            stream.read_exact(&mut bytes).await.ok()?;
+            Message::from_vec(&bytes).ok()
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Close {
+            /// close the connection after it has been idle for a while
+            WhenIdle,
+            /// read the next query and close the connection without answering it
+            OnNextQuery,
+        }
+
+        for close in [Close::WhenIdle, Close::OnNextQuery] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("tcp://{}", listener.local_addr().unwrap());
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let upstream = tokio::spawn({
+                let accepted = accepted.clone();
+                async move {
+                    loop {
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        accepted.fetch_add(1, Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            let Some(request) = read_query(&mut stream).await else {
+                                return;
+                            };
+                            let query = request.queries()[0].clone();
+                            let mut response = Message::response(request.id(), request.op_code());
+                            response.set_recursion_available(true);
+                            response.add_query(query.clone());
+                            response.add_answer(Record::from_rdata(
+                                query.name().clone(),
+                                30,
+                                RData::A("192.0.2.1".parse().unwrap()),
+                            ));
+                            let bytes = response.to_vec().unwrap();
+                            stream.write_u16(bytes.len() as u16).await.unwrap();
+                            stream.write_all(&bytes).await.unwrap();
+                            match close {
+                                Close::WhenIdle => {
+                                    tokio::time::sleep(Duration::from_millis(50)).await
+                                }
+                                Close::OnNextQuery => {
+                                    read_query(&mut stream).await;
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
+            let server = NameServer::new(
+                NameServerInfo::from(url.parse::<DnsUrl>().unwrap()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            const QUERIES: usize = 3;
+            for i in 0..QUERIES {
+                if i > 0 && matches!(close, Close::WhenIdle) {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                let result = server
+                    .lookup(format!("q{i}.example."), RecordType::A)
+                    .timeout(Duration::from_secs(3))
+                    .await
+                    .unwrap_or_else(|_| panic!("{close:?}: query {i} timed out"));
+                let response =
+                    result.unwrap_or_else(|err| panic!("{close:?}: query {i} failed: {err}"));
+                assert_eq!(
+                    response.ip_addrs(),
+                    vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+                );
+            }
+            assert_eq!(accepted.load(Ordering::Relaxed), QUERIES, "{close:?}");
+            upstream.abort();
+        }
+    }
+
     #[tokio::test]
     async fn test_query_non_ip_upstream_failure_does_not_hide_success() {
         use crate::libdns::proto::rr::RData;

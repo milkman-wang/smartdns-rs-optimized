@@ -52,11 +52,18 @@ impl Connection {
                     .add_query(query.clone())
                     .set_recursion_desired(options.recursion_desired);
                 *message.extensions_mut() = edns.cloned();
-                client
-                    .send(proto::xfer::DnsRequest::new(message, options))
-                    .first_answer()
-                    .await
-                    .map(Into::into)
+                let request = proto::xfer::DnsRequest::new(message, options);
+                match client.send(request.clone()).first_answer().await {
+                    // The cached connection was already closed by the peer (e.g. a TCP
+                    // upstream that drops idle connections). `NameServer` has marked it
+                    // failed, so sending again establishes a fresh connection.
+                    Err(err) if is_closed_connection_error(&err) => {
+                        log::debug!("upstream connection closed ({err}), retrying on a new one");
+                        client.send(request).first_answer().await
+                    }
+                    res => res,
+                }
+                .map(Into::into)
             }
         }
     }
@@ -72,6 +79,26 @@ impl Connection {
         )
         .await?;
         Ok(())
+    }
+}
+
+/// Errors that mean the connection was gone before the query got an answer, so the
+/// query is worth one more try on a new connection. Timeouts and DNS-level errors
+/// (`NoRecordsFound`, which also carries SERVFAIL/REFUSED replies) are not retried.
+fn is_closed_connection_error(err: &ProtoError) -> bool {
+    match err.kind() {
+        // the background task of the connection has exited, its request channel is closed
+        ProtoErrorKind::Busy => true,
+        ProtoErrorKind::Message(msg) => matches!(*msg, "stream closed" | "receiver was canceled"),
+        ProtoErrorKind::Io(err) => matches!(
+            err.kind(),
+            io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::NotConnected
+        ),
+        _ => false,
     }
 }
 
