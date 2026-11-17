@@ -906,7 +906,9 @@ async fn per_nameserver_lookup_ip(
             let query = lookup.query().clone();
 
             let answers = lookup.take_answers();
-            let had_ip = answers.iter().any(|record| record.data().ip_addr().is_some());
+            let had_ip = answers
+                .iter()
+                .any(|record| record.data().ip_addr().is_some());
             let answers = {
                 let mut new_ans = Vec::new();
                 let mut alias_set = Vec::new(); // dedup
@@ -1095,7 +1097,10 @@ mod tests {
                 .expect_err("a CNAME-only answer has no address");
 
             assert!(err.is_negative_response());
-            assert!(!err.is_nx_domain(), "CNAME-only {record_type} must not be NXDOMAIN");
+            assert!(
+                !err.is_nx_domain(),
+                "CNAME-only {record_type} must not be NXDOMAIN"
+            );
         }
     }
 
