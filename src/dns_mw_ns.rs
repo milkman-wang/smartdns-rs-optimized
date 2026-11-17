@@ -906,6 +906,7 @@ async fn per_nameserver_lookup_ip(
             let query = lookup.query().clone();
 
             let answers = lookup.take_answers();
+            let had_ip = answers.iter().any(|record| record.data().ip_addr().is_some());
             let answers = {
                 let mut new_ans = Vec::new();
                 let mut alias_set = Vec::new(); // dedup
@@ -939,8 +940,16 @@ async fn per_nameserver_lookup_ip(
             };
 
             if answers.is_empty() {
-                let no_records = AuthorityData::new(Box::new(query), None, true, true, None);
-                return Err(ProtoErrorKind::NoRecordsFound(no_records.into()).into());
+                // An answer with no address of the queried type (only CNAMEs) is
+                // NODATA, not NXDOMAIN: the name exists, maybe for the other family.
+                // When every address was filtered out, this upstream has no usable
+                // answer; report a failure so other upstreams can still answer.
+                let no_records = AuthorityData::new(Box::new(query), None, true, false, None);
+                let mut no_records: crate::libdns::proto::NoRecords = no_records.into();
+                if had_ip {
+                    no_records.response_code = ResponseCode::ServFail;
+                }
+                return Err(ProtoErrorKind::NoRecordsFound(no_records).into());
             }
 
             *lookup.answers_mut() = answers;
@@ -1011,6 +1020,95 @@ mod tests {
                 assert!(ips.contains(&response.ip_addrs()[0]));
             }
         }
+    }
+
+    /// Runs `per_nameserver_lookup_ip` against a one-shot UDP upstream that answers
+    /// `alias.example.` with a CNAME and, optionally, one address of `ip`.
+    async fn filtered_lookup(
+        record_type: RecordType,
+        ip: Option<IpAddr>,
+        blacklist: &IpSet,
+    ) -> Result<DnsResponse, LookupError> {
+        use crate::config::NameServerInfo;
+        use crate::dns_url::DnsUrl;
+        use crate::libdns::proto::op::Message;
+        use crate::libdns::proto::rr::rdata::CNAME;
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let url: DnsUrl = format!("udp://{}", socket.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let mut config = NameServerInfo::from(url);
+        config.blacklist_ip = true;
+        let server = NameServer::new(config, None, None, None, None).unwrap();
+        let upstream = tokio::spawn(async move {
+            let mut buffer = [0u8; 4096];
+            let (len, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_vec(&buffer[..len]).unwrap();
+            let name = request.queries()[0].name().clone();
+            let canonical: Name = "cdn.example.".parse().unwrap();
+            let mut response = request.to_response();
+            response.set_recursion_available(true);
+            response.add_answer(Record::from_rdata(
+                name,
+                60,
+                RData::CNAME(CNAME(canonical.clone())),
+            ));
+            if let Some(ip) = ip {
+                response.add_answer(Record::from_rdata(canonical, 60, RData::from(ip)));
+            }
+            socket
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let empty_ips = IpSet::default();
+        let empty_aliases = IpMap::default();
+        let options = LookupIpOptions {
+            response_strategy: ResponseMode::FastestResponse,
+            speed_check_mode: None,
+            no_speed_check: true,
+            ignore_ip: &empty_ips,
+            whitelist_ip: &empty_ips,
+            blacklist_ip: blacklist,
+            ip_alias: &empty_aliases,
+            lookup_options: LookupOptions {
+                record_type,
+                ..Default::default()
+            },
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            per_nameserver_lookup_ip(&server, "alias.example.".parse().unwrap(), &options),
+        )
+        .await
+        .unwrap();
+        upstream.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn test_ip_filter_cname_only_answer_is_nodata() {
+        for record_type in [RecordType::A, RecordType::AAAA] {
+            let err = filtered_lookup(record_type, None, &IpSet::default())
+                .await
+                .expect_err("a CNAME-only answer has no address");
+
+            assert!(err.is_negative_response());
+            assert!(!err.is_nx_domain(), "CNAME-only {record_type} must not be NXDOMAIN");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ip_filter_all_blacklisted_is_not_a_negative_answer() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let blacklist = IpSet::new(["192.0.2.1/32".parse().unwrap()]);
+        let err = filtered_lookup(RecordType::A, Some(ip), &blacklist)
+            .await
+            .expect_err("the only address is blacklisted");
+
+        assert!(!err.is_negative_response());
+        assert!(!err.is_nx_domain());
     }
 
     #[tokio::test]
