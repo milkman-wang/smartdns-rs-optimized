@@ -27,6 +27,12 @@ procd_set_param() {
 		}
 	fi
 }
+watched=""
+procd_append_param() {
+	[ "$1" = file ] || return 0
+	shift
+	watched="${watched}${watched:+ }$*"
+}
 procd_close_instance() { record ready; }
 procd_close_service() { record update; }
 
@@ -55,4 +61,24 @@ generate_status=0
 SERVICE_ENABLED=0
 reload_service
 [ "$events" = "sections generate open cron dnsmasq update" ]
+
+# updatefiles writes into these directories and then reloads; the new lists
+# only take effect if procd sees the files change.
+lists="$(mktemp -d)"
+trap 'rm -rf "$lists"' EXIT
+mkdir -p "$lists/domain-set" "$lists/ip-set" "$lists/conf.d" "$lists/download"
+: > "$lists/domain-set/antiad.txt"
+: > "$lists/ip-set/cn.txt"
+DOMAIN_SET_DIR="$lists/domain-set"
+IP_SET_DIR="$lists/ip-set"
+CONF_DOWNLOAD_DIR="$lists/conf.d"
+DOWNLOAD_DIR="$lists/download"
+events=""
+watched=""
+SERVICE_ENABLED=1
+reload_service
+[ "$watched" = "$lists/domain-set/antiad.txt $lists/ip-set/cn.txt" ] || {
+	echo "reload does not watch downloaded lists: $watched" >&2
+	exit 1
+}
 echo "Reload preserves service on invalid config and validates once before updating: OK"

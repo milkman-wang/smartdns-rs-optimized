@@ -142,6 +142,8 @@ nslookup openwrt.org 127.0.0.1
 /etc/init.d/smartdns updatefiles
 ```
 
+下载完成后会执行 reload；procd 同时跟踪下载目录（`domain-set`、`ip-set`、`conf.d`、`download`）里的文件，列表内容变化时会替换进程，新列表随即生效。
+
 ## 升级原版 luci-app-smartdns
 
 新 init 脚本会读取原版的 `redirect` 值：`dnsmasq-upstream`、`redirect` 和 `none`，并映射到新的端口/dnsmasq 行为。先备份 `/etc/config/smartdns`，卸载原版二进制和 LuCI 包，再安装这两个包。原版独有且表中标为“不支持”的字段会保留在 UCI 中，但不会出现在新页面，也不会写入 Rust 配置。

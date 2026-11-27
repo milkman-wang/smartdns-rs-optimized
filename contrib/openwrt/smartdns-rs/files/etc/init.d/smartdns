@@ -880,6 +880,12 @@ start_prepared_service()
 	# unchanged. Track their contents so a file-only reload replaces the process.
 	procd_set_param file "$RUNTIME_CONF" "$CUSTOM_CONF" "$ADDRESS_CONF" \
 		"$BLACKLIST_CONF" "$FORWARDING_LIST" "$BLOCK_LIST"
+	# Downloaded lists are included by path, so updatefiles' reload must see
+	# their contents too, or the running process keeps the old lists.
+	local file
+	for file in "$DOMAIN_SET_DIR"/* "$IP_SET_DIR"/* "$CONF_DOWNLOAD_DIR"/* "$DOWNLOAD_DIR"/*; do
+		[ -f "$file" ] && procd_append_param file "$file"
+	done
 	procd_set_param limits nofile="65535 65535"
 	[ "$COREDUMP" = "1" ] && procd_append_param limits core="unlimited"
 	procd_set_param stdout 1
